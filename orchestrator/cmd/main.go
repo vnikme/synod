@@ -38,6 +38,9 @@ func main() {
 	}
 	defer store.Close()
 
+	selfURL := strings.TrimRight(os.Getenv("ORCHESTRATOR_BASE_URL"), "/")
+	sandboxURL := strings.TrimRight(os.Getenv("SANDBOX_URL"), "/")
+
 	// Gemini LLM client
 	gemini, err := internal.NewGeminiClient(ctx, os.Getenv("GEMINI_API_KEY"), os.Getenv("LLM_MODEL"))
 	if err != nil {
@@ -46,15 +49,12 @@ func main() {
 	}
 
 	// Cloud Tasks dispatcher
-	dispatcher, err := internal.NewDispatcher(ctx)
+	dispatcher, err := internal.NewDispatcher(ctx, selfURL)
 	if err != nil {
 		slog.Error("dispatcher init failed", "error", err)
 		os.Exit(1)
 	}
 	defer dispatcher.Close()
-
-	selfURL := strings.TrimRight(os.Getenv("ORCHESTRATOR_BASE_URL"), "/")
-	sandboxURL := strings.TrimRight(os.Getenv("SANDBOX_URL"), "/")
 
 	// Initialize agents
 	dataAgent := internal.NewDataAgent(gemini, store,
@@ -77,7 +77,8 @@ func main() {
 	)
 
 	// HTTP server
-	server := internal.NewServer(orchestrator, store, dispatcher, selfURL)
+	internalAuth := internal.OIDCAuthMiddleware(selfURL, os.Getenv("SERVICE_ACCOUNT_EMAIL"))
+	server := internal.NewServer(orchestrator, store, dispatcher, selfURL, internalAuth)
 
 	port := os.Getenv("PORT")
 	if port == "" {

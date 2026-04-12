@@ -18,15 +18,17 @@ type Server struct {
 	store        *Store
 	dispatcher   *Dispatcher
 	selfURL      string
+	internalAuth func(http.Handler) http.Handler
 	mux          *http.ServeMux
 }
 
-func NewServer(orchestrator *OrchestratorAgent, store *Store, dispatcher *Dispatcher, selfURL string) *Server {
+func NewServer(orchestrator *OrchestratorAgent, store *Store, dispatcher *Dispatcher, selfURL string, internalAuth func(http.Handler) http.Handler) *Server {
 	s := &Server{
 		orchestrator: orchestrator,
 		store:        store,
 		dispatcher:   dispatcher,
 		selfURL:      selfURL,
+		internalAuth: internalAuth,
 		mux:          http.NewServeMux(),
 	}
 	s.registerRoutes()
@@ -37,7 +39,7 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("GET /health", s.handleHealth)
 	s.mux.HandleFunc("POST /api/v1/tasks", s.handleIngest)
 	s.mux.HandleFunc("GET /api/v1/tasks/{jobID}", s.handleStatus)
-	s.mux.HandleFunc("POST /internal/route", s.handleRoute)
+	s.mux.Handle("POST /internal/route", s.internalAuth(http.HandlerFunc(s.handleRoute)))
 }
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
