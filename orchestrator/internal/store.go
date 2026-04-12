@@ -132,7 +132,6 @@ func (s *Store) IncrementHopCount(ctx context.Context, jobID, sessionID string) 
 		newHop = job.HopCount + 1
 		return tx.Update(ref, []firestore.Update{
 			{Path: "hop_count", Value: newHop},
-			{Path: "active_agent", Value: AgentOrchestrator},
 			{Path: "updated_at", Value: time.Now()},
 		})
 	})

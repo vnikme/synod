@@ -56,6 +56,7 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("GET /health", s.handleHealth)
 	s.mux.HandleFunc("POST /api/v1/tasks", s.handleIngest)
 	s.mux.HandleFunc("GET /api/v1/tasks/{jobID}", s.handleStatus)
+	s.mux.HandleFunc("POST /api/v1/tasks/{jobID}/reply", s.handleReply)
 	s.mux.Handle("POST /internal/route", s.internalAuth(http.HandlerFunc(s.handleRoute)))
 	s.mux.Handle("POST /internal/agent/data", s.internalAuth(http.HandlerFunc(s.handleAgentData)))
 	s.mux.Handle("POST /internal/agent/analyst", s.internalAuth(http.HandlerFunc(s.handleAgentAnalyst)))
@@ -155,6 +156,63 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, job)
+}
+
+func (s *Server) handleReply(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	jobID := r.PathValue("jobID")
+
+	var req ReplyRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid request body"})
+		return
+	}
+	if strings.TrimSpace(req.Message) == "" || strings.TrimSpace(req.SessionID) == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "message and session_id are required"})
+		return
+	}
+	sessionID := strings.TrimSpace(req.SessionID)
+
+	job, err := s.store.GetJob(ctx, jobID, sessionID)
+	if err != nil {
+		slog.Error("reply: get job failed", "error", err)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal error"})
+		return
+	}
+	if job == nil {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "job not found"})
+		return
+	}
+	if job.Status != StatusHITL {
+		writeJSON(w, http.StatusConflict, map[string]string{"error": "job is not awaiting user input"})
+		return
+	}
+
+	// Append user reply to chat history
+	if err := s.store.AppendChatHistory(ctx, sessionID, ChatMessage{Role: "user", Content: req.Message}); err != nil {
+		slog.Error("reply: append chat history failed", "error", err)
+	}
+
+	// Transition job back to QUEUED for orchestrator
+	if err := s.store.UpdateJob(ctx, jobID, sessionID, []firestore.Update{
+		{Path: "status", Value: StatusQueued},
+		{Path: "active_agent", Value: AgentOrchestrator},
+		{Path: "final_result", Value: ""},
+	}); err != nil {
+		slog.Error("reply: update job failed", "error", err)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal error"})
+		return
+	}
+
+	// Enqueue orchestrator to process the reply
+	if err := s.dispatcher.Enqueue(ctx, s.selfURL+"/internal/route", jobID, sessionID); err != nil {
+		slog.Error("reply: enqueue route failed", "error", err)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal error"})
+		return
+	}
+
+	slog.Info("reply: resumed job", "job_id", jobID, "session_id", sessionID)
+	writeJSON(w, http.StatusAccepted, map[string]string{"status": "resumed"})
 }
 
 func (s *Server) handleRoute(w http.ResponseWriter, r *http.Request) {
@@ -272,7 +330,7 @@ func (s *Server) handleAgentExec(w http.ResponseWriter, r *http.Request, agent A
 		return
 	}
 
-	// Re-read job to check if agent set a terminal state (e.g., NEEDS_CONTEXT, COMPLETED)
+	// Re-read job to check if agent set a terminal state (e.g., COMPLETED, HITL)
 	job, err = s.store.GetJob(ctx, jobID, sessionID)
 	if err != nil {
 		slog.Error("agent: re-read job failed", "agent", agent, "error", err)

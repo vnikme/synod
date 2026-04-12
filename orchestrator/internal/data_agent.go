@@ -224,10 +224,7 @@ func (a *DataAgent) Execute(ctx context.Context, job *Job, instructions string, 
 
 	if len(rawChunks) == 0 {
 		slog.Warn("data agent: no data collected", "job_id", job.JobID)
-		return TokenUsage{}, a.store.UpdateJob(ctx, job.JobID, job.SessionID, []firestore.Update{
-			{Path: "status", Value: StatusNeedsCtx},
-			{Path: "missing_queries", Value: queries},
-		})
+		return TokenUsage{}, fmt.Errorf("no data collected for queries: %v", queries)
 	}
 
 	// LLM-extract structured facts from raw data
