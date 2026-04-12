@@ -52,22 +52,25 @@ Despite lacking strict authentication, the system must support multiple concurre
 
 ## 4. High-Level Architecture
 
-The system consists of four primary components interacting via an event-driven pattern.
+The system consists of five primary components interacting via an event-driven pattern.
 
-### 4.1. Core Orchestrator (Go / Cloud Run)
-*   **Function:** The central State Machine. Exposes the public REST API, evaluates user intent, mutates the global state, and dispatches tasks.
-*   **Design Choice:** Go is utilized for its low memory footprint, strict typing, and high concurrency when handling inbound HTTP connections and webhooks.
+### 4.1. Orchestration Agent (Go / Cloud Run)
+*   **Function:** The LLM-driven central controller. Reads the Blackboard, asks Gemini to determine which specialized agent should act next, executes that agent, and enqueues the next iteration via Cloud Tasks. Exposes the public REST API.
+*   **Design Choice:** Go is utilized for its low memory footprint, strict typing, and high concurrency. All agents run in the same Go binary — they are lightweight LLM wrappers, not separate services.
 
-### 4.2. Worker Fleet (Python / Cloud Run)
-*   **Function:** Ephemeral execution environments exposing internal webhooks.
-*   **Nodes:**
-    *   `Researcher`: Executes web searches and fetches financial metrics (SEC APIs). Restricted from performing analysis to prevent context bloat.
-    *   `Quant Analyst`: Reads extracted facts, generates Python code (Pandas/Matplotlib), executes it within a sandboxed environment, and outputs artifacts.
+### 4.2. Specialized Agents (Go, in-process)
+*   **Data Agent:** Fetches external data via Google Custom Search and SEC EDGAR XBRL API. Uses Gemini to extract structured facts from raw data. Writes facts to the Blackboard.
+*   **Analyst Agent:** Generates Python analysis code via Gemini, sends it to the Sandbox service for execution, and stores results (charts, analysis output) on the Blackboard. Self-corrects by feeding execution errors back to Gemini (max 3 retries).
+*   **Report Agent:** Synthesizes collected facts and analysis artifacts into a structured final report. Marks the job as COMPLETED.
 
-### 4.3. The Blackboard (Firestore)
+### 4.3. Sandbox Service (Python / Cloud Run)
+*   **Function:** Isolated code execution environment. Accepts Python code, validates it via AST against an import allowlist, executes in a subprocess with a restricted `__import__` hook and timeout, returns stdout and captured matplotlib charts as base64 PNG.
+*   **Design Choice:** Python is used solely for sandboxed execution of LLM-generated data science code (pandas, matplotlib, numpy). No agent logic runs here.
+
+### 4.4. The Blackboard (Firestore)
 *   **Function:** The centralized `SessionState` and `JobState`. Acts as the single source of truth for all agents, ensuring statelessness in the Cloud Run containers.
 
-### 4.4. Message Broker (Cloud Tasks)
+### 4.5. Message Broker (Cloud Tasks)
 *   **Function:** Provides reliable, asynchronous task delivery. Handles retries with exponential backoff for transient failures (e.g., LLM API rate limits, network drops) and supports task execution times up to 30 minutes.
 
 ---
@@ -77,25 +80,26 @@ The system consists of four primary components interacting via an event-driven p
 The system eschews rigid Directed Acyclic Graphs (DAGs) in favor of a **Pull-Based State Model**. Agents dynamically request data if their context is insufficient.
 
 1.  **Ingestion:** Client sends POST request containing an optional `session_id` and a `prompt`.
-2.  **Setup:** Go Orchestrator generates a `session_id` (if not provided), creates a `Job` in Firestore bound to the `session_id`, returns `202 Accepted` with the `job_id` and `session_id`, and enqueues the initial task to Cloud Tasks.
-3.  **Worker Invocation:** Cloud Tasks invokes the target Python Worker (e.g., `Quant Analyst`) via an internal webhook.
-4.  **State Evaluation:** The Worker reads the `Job` and associated `chat_history` from Firestore using the `job_id` and `session_id`.
-5.  **Dynamic Request (Missing Context):** If the `Quant Analyst` lacks necessary data, it updates the Firestore document status to `NEEDS_CONTEXT`, populates the `missing_queries` array, enqueues a callback to the Orchestrator, and terminates successfully (HTTP 200).
-6.  **Re-routing:** The Orchestrator receives the callback, reads the `NEEDS_CONTEXT` state, and enqueues a task for the `Researcher` to fulfill the missing queries.
-7.  **Resolution:** Once the `Researcher` populates the Blackboard, the Orchestrator re-enqueues the `Quant Analyst`, which now successfully completes the task.
+2.  **Setup:** Orchestrator generates a `session_id` (if not provided), creates a `Job` in Firestore, returns `202 Accepted` with `job_id` and `session_id`, and enqueues the initial routing task to Cloud Tasks.
+3.  **Orchestration:** Cloud Tasks invokes `/internal/route`. The Orchestration Agent reads the Blackboard, asks Gemini which agent should act next, and executes that agent in-process.
+4.  **Data Collection:** The Data Agent fetches external data (Google CSE, SEC EDGAR), extracts structured facts via Gemini, and writes them to the Blackboard.
+5.  **Analysis:** The Analyst Agent generates Python code via Gemini, sends it to the Sandbox service for execution, and stores charts/results on the Blackboard. On failure, feeds the error back to Gemini for self-correction.
+6.  **Dynamic Context Resolution:** If any agent determines insufficient context, it sets the job status to `NEEDS_CONTEXT` with `missing_queries`. The next orchestration iteration routes to the Data Agent to fulfill them.
+7.  **Reporting:** The Report Agent synthesizes all collected facts and analysis into a structured final report, marks the job COMPLETED, and appends the report to session chat history.
+8.  **Iteration:** After each agent completes, the Orchestrator enqueues another Cloud Task to `/internal/route` unless the job reached a terminal state (COMPLETED, FAILED, HITL).
 
 ---
 
 ## 6. Security & Defensive AI Mechanisms
 
 ### 6.1. LLM Output Validation & Self-Correction
-*   LLM outputs are strictly enforced via schema validation (Pydantic in Python, Struct Unmarshaling in Go).
-*   If an LLM returns malformed JSON, the worker catches the parsing error and automatically triggers a self-correction loop, feeding the error back to the LLM (maximum 3 retries) before failing the task.
+*   LLM outputs are strictly enforced via schema validation (Struct Unmarshaling in Go, Pydantic in the Sandbox).
+*   If an LLM returns malformed JSON, the agent catches the parsing error and automatically triggers a self-correction loop, feeding the error back to the LLM (maximum 3 retries) before failing the task.
 
 ### 6.2. Sandboxed Code Execution
-*   The `Quant Analyst` must execute LLM-generated Python code.
-*   **Pre-flight Check:** The code is parsed into an Abstract Syntax Tree (AST). Imports of `os`, `sys`, and `subprocess` are strictly blocked.
-*   **Execution:** Code is executed using restricted globals/locals and bounded by a 15-second OS-level timeout. Exceptions are caught and fed back to the LLM for self-debugging.
+*   The `Analyst Agent` generates LLM-produced Python code which is executed in a separate Sandbox service.
+*   **Pre-flight Check:** The Sandbox parses code into an Abstract Syntax Tree (AST). An import allowlist restricts imports to safe modules (pandas, numpy, matplotlib, math, etc.). A custom `__import__` hook enforces this at runtime.
+*   **Execution:** Code runs in a child process with restricted builtins (no exec, eval, compile, open) and a 30-second OS-level timeout. Exceptions are caught and fed back to the LLM for self-debugging.
 
 ### 6.3. Infinite Loop Circuit Breaker
 *   To prevent agents from continuously requesting context without resolution, the Go Orchestrator increments a `HopCount` on every state transition.

@@ -2,71 +2,81 @@ package internal
 
 import "time"
 
+// --- Enumerations ---
+
 type JobStatus string
 
 const (
-	StatusQueued      JobStatus = "QUEUED"
-	StatusInProgress  JobStatus = "IN_PROGRESS"
-	StatusNeedsCtx    JobStatus = "NEEDS_CONTEXT"
-	StatusHITL        JobStatus = "HITL"
-	StatusCompleted   JobStatus = "COMPLETED"
-	StatusFailed      JobStatus = "FAILED"
+	StatusQueued     JobStatus = "QUEUED"
+	StatusInProgress JobStatus = "IN_PROGRESS"
+	StatusNeedsCtx   JobStatus = "NEEDS_CONTEXT"
+	StatusHITL       JobStatus = "HITL"
+	StatusCompleted  JobStatus = "COMPLETED"
+	StatusFailed     JobStatus = "FAILED"
 )
 
 type AgentType string
 
 const (
 	AgentOrchestrator AgentType = "orchestrator"
-	AgentResearcher   AgentType = "researcher"
+	AgentData         AgentType = "data"
 	AgentAnalyst      AgentType = "analyst"
+	AgentReport       AgentType = "report"
 )
 
-type ChatMessage struct {
-	Role    string `firestore:"role"    json:"role"`
-	Content string `firestore:"content" json:"content"`
-}
+// --- Domain Models ---
 
-type Session struct {
-	SessionID   string        `firestore:"session_id"   json:"session_id"`
-	ChatHistory []ChatMessage `firestore:"chat_history" json:"chat_history"`
-	CreatedAt   time.Time     `firestore:"created_at"   json:"created_at"`
-	UpdatedAt   time.Time     `firestore:"updated_at"   json:"updated_at"`
+type ChatMessage struct {
+	Role    string `json:"role" firestore:"role"`
+	Content string `json:"content" firestore:"content"`
 }
 
 type Fact struct {
-	Key    string `firestore:"key"    json:"key"`
-	Value  string `firestore:"value"  json:"value"`
-	Source string `firestore:"source" json:"source"`
+	Key    string `json:"key" firestore:"key"`
+	Value  string `json:"value" firestore:"value"`
+	Source string `json:"source" firestore:"source"`
 }
 
 type Asset struct {
-	Type string `firestore:"type" json:"type"`
-	Data string `firestore:"data" json:"data"`
+	Type    string `json:"type" firestore:"type"`
+	Name    string `json:"name" firestore:"name"`
+	Content string `json:"content" firestore:"content"`
+}
+
+type TaskPlan struct {
+	ResearchQueries      []string `json:"research_queries" firestore:"research_queries"`
+	AnalysisInstructions string   `json:"analysis_instructions" firestore:"analysis_instructions"`
+	NeedsResearch        bool     `json:"needs_research" firestore:"needs_research"`
+	NeedsAnalysis        bool     `json:"needs_analysis" firestore:"needs_analysis"`
 }
 
 type Job struct {
-	JobID           string    `firestore:"job_id"           json:"job_id"`
-	SessionID       string    `firestore:"session_id"       json:"session_id"`
-	Status          JobStatus `firestore:"status"           json:"status"`
-	ActiveAgent     AgentType `firestore:"active_agent"     json:"active_agent"`
-	HopCount        int       `firestore:"hop_count"        json:"hop_count"`
-	Prompt          string    `firestore:"prompt"           json:"prompt"`
-	CollectedFacts  []Fact    `firestore:"collected_facts"  json:"collected_facts"`
-	GeneratedAssets []Asset   `firestore:"generated_assets" json:"generated_assets"`
-	MissingQueries  []string  `firestore:"missing_queries"  json:"missing_queries"`
-	FinalResult     string    `firestore:"final_result"     json:"final_result"`
-	CreatedAt       time.Time `firestore:"created_at"       json:"created_at"`
-	UpdatedAt       time.Time `firestore:"updated_at"       json:"updated_at"`
+	JobID             string    `json:"job_id" firestore:"job_id"`
+	SessionID         string    `json:"session_id" firestore:"session_id"`
+	Status            JobStatus `json:"status" firestore:"status"`
+	ActiveAgent       AgentType `json:"active_agent" firestore:"active_agent"`
+	HopCount          int       `json:"hop_count" firestore:"hop_count"`
+	Prompt            string    `json:"prompt" firestore:"prompt"`
+	Plan              *TaskPlan `json:"plan,omitempty" firestore:"plan,omitempty"`
+	CollectedFacts    []Fact    `json:"collected_facts" firestore:"collected_facts"`
+	GeneratedAssets   []Asset   `json:"generated_assets" firestore:"generated_assets"`
+	MissingQueries    []string  `json:"missing_queries" firestore:"missing_queries"`
+	AgentInstructions string    `json:"agent_instructions" firestore:"agent_instructions"`
+	FinalResult       string    `json:"final_result" firestore:"final_result"`
+	CreatedAt         time.Time `json:"created_at" firestore:"created_at"`
+	UpdatedAt         time.Time `json:"updated_at" firestore:"updated_at"`
 }
 
-type TaskPayload struct {
-	JobID     string `json:"job_id"`
-	SessionID string `json:"session_id"`
+type Session struct {
+	SessionID   string        `json:"session_id" firestore:"session_id"`
+	ChatHistory []ChatMessage `json:"chat_history" firestore:"chat_history"`
 }
+
+// --- API Types ---
 
 type IngestRequest struct {
-	SessionID string `json:"session_id,omitempty"`
 	Prompt    string `json:"prompt"`
+	SessionID string `json:"session_id,omitempty"`
 }
 
 type IngestResponse struct {
@@ -74,9 +84,20 @@ type IngestResponse struct {
 	SessionID string `json:"session_id"`
 }
 
-type TaskPlan struct {
-	ResearchQueries      []string `json:"research_queries"`
-	AnalysisInstructions string   `json:"analysis_instructions"`
-	NeedsResearch        bool     `json:"needs_research"`
-	NeedsAnalysis        bool     `json:"needs_analysis"`
+type TaskPayload struct {
+	JobID     string `json:"job_id"`
+	SessionID string `json:"session_id"`
+}
+
+// --- Inter-service Types ---
+
+type SandboxRequest struct {
+	Code string `json:"code"`
+}
+
+type SandboxResponse struct {
+	Success bool     `json:"success"`
+	Stdout  string   `json:"stdout"`
+	Error   string   `json:"error,omitempty"`
+	Charts  []string `json:"charts"`
 }
