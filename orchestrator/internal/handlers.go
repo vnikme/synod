@@ -141,10 +141,17 @@ func (s *Server) handleRoute(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	slog.Info("route: received", "job_id", payload.JobID)
+	jobID := strings.TrimSpace(payload.JobID)
+	sessionID := strings.TrimSpace(payload.SessionID)
+	if jobID == "" || sessionID == "" {
+		http.Error(w, "job_id and session_id are required", http.StatusBadRequest)
+		return
+	}
 
-	if err := s.orchestrator.Execute(ctx, payload.JobID, payload.SessionID); err != nil {
-		slog.Error("orchestrator execution failed", "job_id", payload.JobID, "error", err)
+	slog.Info("route: received", "job_id", jobID)
+
+	if err := s.orchestrator.Execute(ctx, jobID, sessionID); err != nil {
+		slog.Error("orchestrator execution failed", "job_id", jobID, "error", err)
 		// Return 500 so Cloud Tasks retries on transient errors.
 		// Agent-level failures are handled internally (failJob marks FAILED and returns nil).
 		http.Error(w, "orchestrator error", http.StatusInternalServerError)

@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/url"
 	"regexp"
+	"sort"
 	"strings"
 	"time"
 
@@ -249,21 +250,50 @@ var tickerPatterns = func() map[string]*regexp.Regexp {
 
 func detectCIK(query string) string {
 	upper := strings.ToUpper(query)
+
+	// Find earliest positional match among tickers for deterministic results
+	// when queries mention multiple companies.
+	type match struct {
+		cik string
+		pos int
+	}
+	var bestTicker *match
 	for ticker, cik := range tickerCIK {
-		if tickerPatterns[ticker].MatchString(upper) {
-			return cik
+		loc := tickerPatterns[ticker].FindStringIndex(upper)
+		if loc != nil {
+			if bestTicker == nil || loc[0] < bestTicker.pos {
+				bestTicker = &match{cik: cik, pos: loc[0]}
+			}
 		}
 	}
-	// Tokenize query for word-boundary matching against company names
-	// to avoid false positives (e.g., "pineapple" matching "APPLE").
+	if bestTicker != nil {
+		return bestTicker.cik
+	}
+
+	// Tokenize query for word-boundary matching against company names.
 	tokens := strings.FieldsFunc(upper, func(r rune) bool {
 		return (r < 'A' || r > 'Z') && (r < '0' || r > '9')
 	})
 	tokenStr := " " + strings.Join(tokens, " ") + " "
-	for name, cik := range nameCIK {
-		if strings.Contains(tokenStr, " "+name+" ") {
-			return cik
+
+	// Deterministic: sort names and return earliest positional match.
+	names := make([]string, 0, len(nameCIK))
+	for name := range nameCIK {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+
+	var bestName *match
+	for _, name := range names {
+		idx := strings.Index(tokenStr, " "+name+" ")
+		if idx >= 0 {
+			if bestName == nil || idx < bestName.pos {
+				bestName = &match{cik: nameCIK[name], pos: idx}
+			}
 		}
+	}
+	if bestName != nil {
+		return bestName.cik
 	}
 	return ""
 }
