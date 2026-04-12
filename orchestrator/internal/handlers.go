@@ -173,40 +173,36 @@ func (s *Server) handleReply(w http.ResponseWriter, r *http.Request) {
 	}
 	sessionID := strings.TrimSpace(req.SessionID)
 
-	job, err := s.store.GetJob(ctx, jobID, sessionID)
+	// Append user reply to chat history first — if this fails, we must not
+	// proceed (the orchestrator would re-route without seeing the reply).
+	if err := s.store.AppendChatHistory(ctx, sessionID, ChatMessage{Role: "user", Content: req.Message}); err != nil {
+		slog.Error("reply: append chat history failed", "error", err)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal error"})
+		return
+	}
+
+	// Atomic resume: CAS HITL → QUEUED+orchestrator, reset hop_count, clear final_result.
+	// Only one concurrent reply succeeds; others get nil and return 409.
+	job, err := s.store.ResumeHITLJob(ctx, jobID, sessionID)
 	if err != nil {
-		slog.Error("reply: get job failed", "error", err)
+		slog.Error("reply: resume job failed", "error", err)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal error"})
 		return
 	}
 	if job == nil {
-		writeJSON(w, http.StatusNotFound, map[string]string{"error": "job not found"})
-		return
-	}
-	if job.Status != StatusHITL {
 		writeJSON(w, http.StatusConflict, map[string]string{"error": "job is not awaiting user input"})
 		return
 	}
 
-	// Append user reply to chat history
-	if err := s.store.AppendChatHistory(ctx, sessionID, ChatMessage{Role: "user", Content: req.Message}); err != nil {
-		slog.Error("reply: append chat history failed", "error", err)
-	}
-
-	// Transition job back to QUEUED for orchestrator
-	if err := s.store.UpdateJob(ctx, jobID, sessionID, []firestore.Update{
-		{Path: "status", Value: StatusQueued},
-		{Path: "active_agent", Value: AgentOrchestrator},
-		{Path: "final_result", Value: ""},
-	}); err != nil {
-		slog.Error("reply: update job failed", "error", err)
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal error"})
-		return
-	}
-
-	// Enqueue orchestrator to process the reply
+	// Enqueue orchestrator. On failure, roll back to HITL so the client can retry safely.
 	if err := s.dispatcher.Enqueue(ctx, s.selfURL+"/internal/route", jobID, sessionID); err != nil {
 		slog.Error("reply: enqueue route failed", "error", err)
+		if rollbackErr := s.store.UpdateJob(ctx, jobID, sessionID, []firestore.Update{
+			{Path: "status", Value: StatusHITL},
+			{Path: "active_agent", Value: AgentOrchestrator},
+		}); rollbackErr != nil {
+			slog.Error("reply: rollback to HITL failed", "error", rollbackErr, "job_id", jobID)
+		}
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal error"})
 		return
 	}

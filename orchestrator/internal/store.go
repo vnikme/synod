@@ -181,6 +181,50 @@ func (s *Store) ClaimQueuedJob(ctx context.Context, jobID, sessionID string, age
 
 // --- Audit Log ---
 
+// ResumeHITLJob atomically transitions a job from HITL to QUEUED+orchestrator,
+// resets hop_count and clears final_result. Returns the job if resume succeeds,
+// or nil if the job is not in HITL state (concurrent reply already resumed it).
+func (s *Store) ResumeHITLJob(ctx context.Context, jobID, sessionID string) (*Job, error) {
+	ref := s.client.Collection("jobs").Doc(jobID)
+	var resumed *Job
+	err := s.client.RunTransaction(ctx, func(ctx context.Context, tx *firestore.Transaction) error {
+		resumed = nil // reset on retry
+		doc, err := tx.Get(ref)
+		if err != nil {
+			if status.Code(err) == codes.NotFound {
+				return nil
+			}
+			return err
+		}
+		var job Job
+		if err := doc.DataTo(&job); err != nil {
+			return err
+		}
+		if job.SessionID != sessionID {
+			return nil
+		}
+		if job.Status != StatusHITL {
+			return nil
+		}
+		if err := tx.Update(ref, []firestore.Update{
+			{Path: "status", Value: StatusQueued},
+			{Path: "active_agent", Value: AgentOrchestrator},
+			{Path: "final_result", Value: ""},
+			{Path: "hop_count", Value: 0},
+			{Path: "updated_at", Value: time.Now()},
+		}); err != nil {
+			return err
+		}
+		job.Status = StatusQueued
+		job.ActiveAgent = AgentOrchestrator
+		job.HopCount = 0
+		job.FinalResult = ""
+		resumed = &job
+		return nil
+	})
+	return resumed, err
+}
+
 // AppendAuditLog writes an audit entry to the jobs/{jobID}/audit subcollection
 // and atomically accumulates token_usage on the job document (when tokens > 0).
 // All writes happen inside a single transaction for consistency and session isolation.
