@@ -142,8 +142,8 @@ func (s *Store) IncrementHopCount(ctx context.Context, jobID, sessionID string) 
 // --- Audit Log ---
 
 // AppendAuditLog writes an audit entry to the jobs/{jobID}/audit subcollection
-// and atomically accumulates token_usage on the job document.
-// Both writes happen inside a single transaction for consistency and session isolation.
+// and atomically accumulates token_usage on the job document (when tokens > 0).
+// All writes happen inside a single transaction for consistency and session isolation.
 func (s *Store) AppendAuditLog(ctx context.Context, jobID, sessionID string, entry AuditEntry) error {
 	entry.Timestamp = time.Now()
 

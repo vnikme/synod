@@ -132,7 +132,16 @@ func (o *OrchestratorAgent) Execute(ctx context.Context, jobID, sessionID string
 	// LLM-driven routing decision
 	decision, routeUsage, err := o.decide(ctx, job, session)
 	if err != nil {
-		return o.failJob(ctx, job, "routing decision failed: "+err.Error())
+		detail := "routing decision failed: " + err.Error()
+		if auditErr := o.store.AppendAuditLog(ctx, jobID, sessionID, AuditEntry{
+			Agent:  AgentOrchestrator,
+			Action: "route",
+			Tokens: routeUsage,
+			Detail: detail,
+		}); auditErr != nil {
+			slog.Error("audit log failed", "job_id", jobID, "agent", "orchestrator", "error", auditErr)
+		}
+		return o.failJob(ctx, job, detail)
 	}
 	if err := o.store.AppendAuditLog(ctx, jobID, sessionID, AuditEntry{
 		Agent:  AgentOrchestrator,
