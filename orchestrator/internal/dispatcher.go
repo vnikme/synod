@@ -21,6 +21,9 @@ type Dispatcher struct {
 }
 
 func NewDispatcher(ctx context.Context, oidcAudience string) (*Dispatcher, error) {
+	if oidcAudience == "" {
+		return nil, fmt.Errorf("oidcAudience must not be empty (set ORCHESTRATOR_BASE_URL)")
+	}
 	projectID := os.Getenv("GCP_PROJECT_ID")
 	if projectID == "" {
 		return nil, fmt.Errorf("missing required env var GCP_PROJECT_ID")

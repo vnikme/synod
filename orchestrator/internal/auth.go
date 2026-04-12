@@ -15,8 +15,8 @@ import (
 // /internal/* handlers.
 //
 // The token's audience is verified against the expectedAudience (typically
-// ORCHESTRATOR_BASE_URL). If expectedSAEmail is non-empty, the token's
-// email claim must also match (defense-in-depth).
+// ORCHESTRATOR_BASE_URL). The token's email claim is verified against
+// expectedSAEmail (SERVICE_ACCOUNT_EMAIL) when non-empty.
 //
 // Set DISABLE_INTERNAL_AUTH=true to skip validation in local development.
 func OIDCAuthMiddleware(expectedAudience, expectedSAEmail string) func(http.Handler) http.Handler {
@@ -39,13 +39,14 @@ func OIDCAuthMiddleware(expectedAudience, expectedSAEmail string) func(http.Hand
 				return
 			}
 
-			token := strings.TrimPrefix(authHeader, "Bearer ")
-			if token == authHeader {
-				// No "Bearer " prefix found
+			// RFC 6750: scheme is case-insensitive, split on whitespace.
+			fields := strings.Fields(authHeader)
+			if len(fields) != 2 || !strings.EqualFold(fields[0], "Bearer") {
 				slog.Warn("auth: malformed Authorization header", "path", r.URL.Path)
 				http.Error(w, "unauthorized", http.StatusUnauthorized)
 				return
 			}
+			token := fields[1]
 
 			payload, err := idtoken.Validate(r.Context(), token, expectedAudience)
 			if err != nil {

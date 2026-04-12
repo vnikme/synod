@@ -23,6 +23,9 @@ type Server struct {
 }
 
 func NewServer(orchestrator *OrchestratorAgent, store *Store, dispatcher *Dispatcher, selfURL string, internalAuth func(http.Handler) http.Handler) *Server {
+	if internalAuth == nil {
+		internalAuth = func(next http.Handler) http.Handler { return next }
+	}
 	s := &Server{
 		orchestrator: orchestrator,
 		store:        store,
