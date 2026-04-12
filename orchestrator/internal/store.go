@@ -151,6 +151,9 @@ func (s *Store) ClaimQueuedJob(ctx context.Context, jobID, sessionID string, age
 		claimed = nil // reset on retry
 		doc, err := tx.Get(ref)
 		if err != nil {
+			if status.Code(err) == codes.NotFound {
+				return nil // job doesn't exist — return nil, nil (ACK)
+			}
 			return err
 		}
 		var job Job
@@ -158,7 +161,7 @@ func (s *Store) ClaimQueuedJob(ctx context.Context, jobID, sessionID string, age
 			return err
 		}
 		if job.SessionID != sessionID {
-			return fmt.Errorf("job %s not found for session %s", jobID, sessionID)
+			return nil // session mismatch — treat as not-found (ACK)
 		}
 		if job.Status != StatusQueued || job.ActiveAgent != agent {
 			// Precondition failed — another delivery already claimed this job
