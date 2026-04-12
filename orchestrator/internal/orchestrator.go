@@ -39,6 +39,9 @@ Available agents:
    Use when: both data collection and analysis are complete.
 4. "complete" — The task is already finished.
    Use when: final_result is already set.
+5. "ask_user" — Ask the user a clarifying question.
+   Use when: the user's request is ambiguous, lacks specific metrics, or you cannot determine how to proceed.
+   Put your question in the "instructions" field.
 
 You will receive the full job state as JSON. Examine:
 - prompt: the user's original request
@@ -46,10 +49,11 @@ You will receive the full job state as JSON. Examine:
 - generated_assets: charts/analysis produced so far (empty = no analysis yet)
 - missing_queries: unfulfilled data requests from previous agent runs
 - final_result: final output text (empty = not done yet)
+- chat_history: prior conversation turns (may contain user clarifications)
 
 Respond with JSON:
 {
-  "next_agent": "data|analyst|report|complete",
+  "next_agent": "data|analyst|report|complete|ask_user",
   "reasoning": "one-sentence explanation of why this agent was chosen",
   "instructions": "specific actionable instructions for the chosen agent",
   "queries": ["search query 1", "query 2"]
@@ -60,6 +64,7 @@ Rules:
 - If facts exist but no analysis/charts have been produced, route to "analyst".
 - If both facts and analysis artifacts exist, route to "report".
 - If final_result is already populated, return "complete".
+- If the request is ambiguous or you need clarification, route to "ask_user" and put your question in "instructions".
 - "queries" is required when next_agent is "data"; omit otherwise.
 - Be specific in "instructions" — tell the agent exactly what data to find or what to compute.
 - For financial requests, include company names/tickers in queries for SEC EDGAR lookup.`
@@ -75,26 +80,22 @@ type OrchestratorAgent struct {
 	gemini     *GeminiClient
 	store      *Store
 	dispatcher *Dispatcher
-	data       *DataAgent
-	analyst    *AnalystAgent
-	report     *ReportAgent
 	selfURL    string
 }
 
 func NewOrchestratorAgent(
 	gemini *GeminiClient, store *Store, dispatcher *Dispatcher,
-	data *DataAgent, analyst *AnalystAgent, report *ReportAgent,
 	selfURL string,
 ) *OrchestratorAgent {
 	return &OrchestratorAgent{
 		gemini: gemini, store: store, dispatcher: dispatcher,
-		data: data, analyst: analyst, report: report,
 		selfURL: selfURL,
 	}
 }
 
 // Execute runs one iteration of the orchestration loop:
-// read blackboard → decide next agent → execute agent → enqueue next hop if needed.
+// read blackboard → decide next agent → update Firestore → enqueue agent task.
+// Agents are invoked asynchronously via Cloud Tasks, not synchronously.
 func (o *OrchestratorAgent) Execute(ctx context.Context, jobID, sessionID string) error {
 	job, err := o.store.GetJob(ctx, jobID, sessionID)
 	if err != nil {
@@ -120,6 +121,7 @@ func (o *OrchestratorAgent) Execute(ctx context.Context, jobID, sessionID string
 		slog.Warn("circuit breaker triggered", "job_id", jobID, "hop_count", newHop)
 		return o.store.UpdateJob(ctx, jobID, sessionID, []firestore.Update{
 			{Path: "status", Value: StatusHITL},
+			{Path: "final_result", Value: "Maximum processing steps reached. Please refine your request or provide additional context."},
 		})
 	}
 
@@ -155,74 +157,49 @@ func (o *OrchestratorAgent) Execute(ctx context.Context, jobID, sessionID string
 		"job_id", jobID, "next_agent", decision.NextAgent, "reasoning", decision.Reasoning,
 	)
 
-	// Dispatch to chosen agent
+	// Dispatch to chosen agent via Cloud Tasks (async)
 	switch decision.NextAgent {
 	case "data":
 		if len(decision.Queries) == 0 {
 			return o.failJob(ctx, job, "routing decided 'data' but provided no queries")
 		}
 		if err := o.store.UpdateJob(ctx, jobID, sessionID, []firestore.Update{
-			{Path: "status", Value: StatusInProgress},
+			{Path: "status", Value: StatusQueued},
 			{Path: "active_agent", Value: AgentData},
 			{Path: "agent_instructions", Value: decision.Instructions},
 			{Path: "missing_queries", Value: decision.Queries},
 		}); err != nil {
 			return fmt.Errorf("update for data agent: %w", err)
 		}
-		agentUsage, err := o.data.Execute(ctx, job, decision.Instructions, decision.Queries)
-		if auditErr := o.store.AppendAuditLog(ctx, jobID, sessionID, AuditEntry{
-			Agent: AgentData, Action: "execute", Tokens: agentUsage,
-			Detail: fmt.Sprintf("queries=%d", len(decision.Queries)),
-		}); auditErr != nil {
-			slog.Error("audit log failed", "job_id", jobID, "agent", "data", "error", auditErr)
-		}
-		if err != nil {
-			slog.Error("data agent failed", "error", err)
-			return o.failJob(ctx, job, "data agent: "+err.Error())
-		}
+		return o.dispatcher.Enqueue(ctx, o.selfURL+"/internal/agent/data", jobID, sessionID)
 
 	case "analyst":
 		if err := o.store.UpdateJob(ctx, jobID, sessionID, []firestore.Update{
-			{Path: "status", Value: StatusInProgress},
+			{Path: "status", Value: StatusQueued},
 			{Path: "active_agent", Value: AgentAnalyst},
 			{Path: "agent_instructions", Value: decision.Instructions},
 		}); err != nil {
 			return fmt.Errorf("update for analyst: %w", err)
 		}
-		agentUsage, err := o.analyst.Execute(ctx, job, decision.Instructions)
-		if auditErr := o.store.AppendAuditLog(ctx, jobID, sessionID, AuditEntry{
-			Agent: AgentAnalyst, Action: "execute", Tokens: agentUsage,
-		}); auditErr != nil {
-			slog.Error("audit log failed", "job_id", jobID, "agent", "analyst", "error", auditErr)
-		}
-		if err != nil {
-			slog.Error("analyst agent failed", "error", err)
-			return o.failJob(ctx, job, "analyst agent: "+err.Error())
-		}
+		return o.dispatcher.Enqueue(ctx, o.selfURL+"/internal/agent/analyst", jobID, sessionID)
 
 	case "report":
 		if err := o.store.UpdateJob(ctx, jobID, sessionID, []firestore.Update{
-			{Path: "status", Value: StatusInProgress},
+			{Path: "status", Value: StatusQueued},
 			{Path: "active_agent", Value: AgentReport},
 			{Path: "agent_instructions", Value: decision.Instructions},
 		}); err != nil {
 			return fmt.Errorf("update for report: %w", err)
 		}
-		// Re-read job to get latest facts/assets written by previous agents
-		job, err = o.store.GetJob(ctx, jobID, sessionID)
-		if err != nil {
-			return fmt.Errorf("re-read job for report: %w", err)
-		}
-		agentUsage, err := o.report.Execute(ctx, job, session, decision.Instructions)
-		if auditErr := o.store.AppendAuditLog(ctx, jobID, sessionID, AuditEntry{
-			Agent: AgentReport, Action: "execute", Tokens: agentUsage,
-		}); auditErr != nil {
-			slog.Error("audit log failed", "job_id", jobID, "agent", "report", "error", auditErr)
-		}
-		if err != nil {
-			slog.Error("report agent failed", "error", err)
-			return o.failJob(ctx, job, "report agent: "+err.Error())
-		}
+		return o.dispatcher.Enqueue(ctx, o.selfURL+"/internal/agent/report", jobID, sessionID)
+
+	case "ask_user":
+		slog.Info("orchestrator: HITL — asking user for clarification", "job_id", jobID)
+		return o.store.UpdateJob(ctx, jobID, sessionID, []firestore.Update{
+			{Path: "status", Value: StatusHITL},
+			{Path: "active_agent", Value: AgentOrchestrator},
+			{Path: "final_result", Value: decision.Instructions},
+		})
 
 	case "complete":
 		slog.Info("orchestrator: task already complete", "job_id", jobID)
@@ -231,23 +208,6 @@ func (o *OrchestratorAgent) Execute(ctx context.Context, jobID, sessionID string
 	default:
 		return o.failJob(ctx, job, "unknown agent: "+decision.NextAgent)
 	}
-
-	// Check if the agent reached a terminal state
-	job, err = o.store.GetJob(ctx, jobID, sessionID)
-	if err != nil {
-		return fmt.Errorf("re-read job after agent: %w", err)
-	}
-	if job.Status == StatusCompleted || job.Status == StatusFailed || job.Status == StatusHITL {
-		slog.Info("orchestrator: agent reached terminal state", "job_id", jobID, "status", job.Status)
-		return nil
-	}
-
-	// Enqueue next orchestration iteration
-	routeURL := o.selfURL + "/internal/route"
-	if err := o.dispatcher.Enqueue(ctx, routeURL, jobID, sessionID); err != nil {
-		return fmt.Errorf("enqueue next hop: %w", err)
-	}
-	return nil
 }
 
 func (o *OrchestratorAgent) decide(ctx context.Context, job *Job, session *Session) (*RoutingDecision, TokenUsage, error) {
