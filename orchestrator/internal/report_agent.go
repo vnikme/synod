@@ -34,7 +34,7 @@ func NewReportAgent(gemini *GeminiClient, store *Store) *ReportAgent {
 	return &ReportAgent{gemini: gemini, store: store}
 }
 
-func (a *ReportAgent) Execute(ctx context.Context, job *Job, session *Session, instructions string) error {
+func (a *ReportAgent) Execute(ctx context.Context, job *Job, session *Session, instructions string) (TokenUsage, error) {
 	slog.Info("report agent: starting", "job_id", job.JobID)
 
 	var prompt strings.Builder
@@ -65,9 +65,9 @@ func (a *ReportAgent) Execute(ctx context.Context, job *Job, session *Session, i
 		}
 	}
 
-	report, err := a.gemini.GenerateText(ctx, reportSystemPrompt, prompt.String())
+	report, usage, err := a.gemini.GenerateText(ctx, reportSystemPrompt, prompt.String())
 	if err != nil {
-		return fmt.Errorf("report generation: %w", err)
+		return usage, fmt.Errorf("report generation: %w", err)
 	}
 
 	slog.Info("report agent: done", "job_id", job.JobID, "report_len", len(report))
@@ -77,7 +77,7 @@ func (a *ReportAgent) Execute(ctx context.Context, job *Job, session *Session, i
 		{Path: "final_result", Value: report},
 		{Path: "active_agent", Value: AgentOrchestrator},
 	}); err != nil {
-		return err
+		return usage, err
 	}
 
 	// Append report to session chat history for multi-turn context
@@ -89,5 +89,5 @@ func (a *ReportAgent) Execute(ctx context.Context, job *Job, session *Session, i
 		}
 	}
 
-	return nil
+	return usage, nil
 }

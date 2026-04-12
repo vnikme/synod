@@ -62,7 +62,7 @@ func NewDataAgent(gemini *GeminiClient, store *Store, cseKey, cseCX, edgarUA str
 	}
 }
 
-func (a *DataAgent) Execute(ctx context.Context, job *Job, instructions string, queries []string) error {
+func (a *DataAgent) Execute(ctx context.Context, job *Job, instructions string, queries []string) (TokenUsage, error) {
 	slog.Info("data agent: starting", "job_id", job.JobID, "num_queries", len(queries))
 
 	var rawChunks []string
@@ -91,7 +91,7 @@ func (a *DataAgent) Execute(ctx context.Context, job *Job, instructions string, 
 
 	if len(rawChunks) == 0 {
 		slog.Warn("data agent: no data collected", "job_id", job.JobID)
-		return a.store.UpdateJob(ctx, job.JobID, job.SessionID, []firestore.Update{
+		return TokenUsage{}, a.store.UpdateJob(ctx, job.JobID, job.SessionID, []firestore.Update{
 			{Path: "status", Value: StatusNeedsCtx},
 			{Path: "missing_queries", Value: queries},
 		})
@@ -105,14 +105,15 @@ func (a *DataAgent) Execute(ctx context.Context, job *Job, instructions string, 
 	prompt := fmt.Sprintf("Instructions: %s\n\nRaw data:\n%s", instructions, combined)
 
 	var facts []Fact
-	if err := a.gemini.GenerateJSON(ctx, factExtractionPrompt, prompt, &facts); err != nil {
-		return fmt.Errorf("fact extraction: %w", err)
+	usage, err := a.gemini.GenerateJSON(ctx, factExtractionPrompt, prompt, &facts)
+	if err != nil {
+		return TokenUsage{}, fmt.Errorf("fact extraction: %w", err)
 	}
 
 	allFacts := append(job.CollectedFacts, facts...)
 	slog.Info("data agent: done", "job_id", job.JobID, "new_facts", len(facts), "total_facts", len(allFacts))
 
-	return a.store.UpdateJob(ctx, job.JobID, job.SessionID, []firestore.Update{
+	return usage, a.store.UpdateJob(ctx, job.JobID, job.SessionID, []firestore.Update{
 		{Path: "collected_facts", Value: allFacts},
 		{Path: "missing_queries", Value: []string{}},
 	})

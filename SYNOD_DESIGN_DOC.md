@@ -118,6 +118,6 @@ The system eschews rigid Directed Acyclic Graphs (DAGs) in favor of a **Pull-Bas
 
 ## 7. Observability & Telemetry
 
-*   **Audit Trail:** Every state mutation in Firestore includes a timestamp, the acting agent, and the delta.
-*   **Cost Tracking:** Token consumption (Prompt/Completion) is aggregated per `job_id` to monitor API burn rates.
-*   **Client UX:** The frontend polls the `Job` document (or connects via Server-Sent Events) to stream the `active_agent` and status, providing transparency into the asynchronous execution process.
+*   **Audit Trail:** Each agent execution writes an `AuditEntry` to a Firestore subcollection (`jobs/{jobID}/audit`). Entries include timestamp, acting agent, action type, token usage, and optional detail string. The orchestrator emits a "route" entry for each routing decision.
+*   **Cost Tracking:** `TokenUsage` (prompt/completion/total) is returned from every LLM call (`GenerateJSON`, `GenerateText`) and accumulated atomically on the Job document via `AppendAuditLog`. The `token_usage` field on the Job provides a running total for cost monitoring.
+*   **Client UX:** The frontend polls the `Job` document (or connects via Server-Sent Events) to stream the `active_agent`, status, and `token_usage`, providing transparency into the asynchronous execution process.

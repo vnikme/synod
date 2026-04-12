@@ -58,7 +58,7 @@ func NewAnalystAgent(ctx context.Context, gemini *GeminiClient, store *Store, sa
 	}, nil
 }
 
-func (a *AnalystAgent) Execute(ctx context.Context, job *Job, instructions string) error {
+func (a *AnalystAgent) Execute(ctx context.Context, job *Job, instructions string) (TokenUsage, error) {
 	slog.Info("analyst agent: starting", "job_id", job.JobID)
 
 	// Build facts context
@@ -73,23 +73,25 @@ func (a *AnalystAgent) Execute(ctx context.Context, job *Job, instructions strin
 	)
 
 	var lastError string
+	var totalUsage TokenUsage
 	for attempt := 1; attempt <= maxCodeRetries; attempt++ {
 		p := prompt
 		if lastError != "" {
 			p += fmt.Sprintf("\n\nYour previous code failed with error:\n%s\n\nFix the issues and regenerate.", lastError)
 		}
 
-		code, err := a.gemini.GenerateText(ctx, codeGenSystemPrompt, p)
+		code, usage, err := a.gemini.GenerateText(ctx, codeGenSystemPrompt, p)
 		if err != nil {
-			return fmt.Errorf("code generation: %w", err)
+			return totalUsage, fmt.Errorf("code generation: %w", err)
 		}
+		totalUsage = totalUsage.Add(usage)
 		code = stripCodeFences(code)
 
 		slog.Info("analyst agent: executing code", "job_id", job.JobID, "attempt", attempt, "code_len", len(code))
 
 		result, err := a.callSandbox(ctx, code)
 		if err != nil {
-			return fmt.Errorf("sandbox call: %w", err)
+			return totalUsage, fmt.Errorf("sandbox call: %w", err)
 		}
 
 		if result.Success {
@@ -109,7 +111,7 @@ func (a *AnalystAgent) Execute(ctx context.Context, job *Job, instructions strin
 					Content: result.Stdout,
 				})
 			}
-			return a.store.UpdateJob(ctx, job.JobID, job.SessionID, []firestore.Update{
+			return totalUsage, a.store.UpdateJob(ctx, job.JobID, job.SessionID, []firestore.Update{
 				{Path: "generated_assets", Value: assets},
 			})
 		}
@@ -118,7 +120,7 @@ func (a *AnalystAgent) Execute(ctx context.Context, job *Job, instructions strin
 		lastError = result.Error
 	}
 
-	return fmt.Errorf("code execution failed after %d attempts: %s", maxCodeRetries, lastError)
+	return totalUsage, fmt.Errorf("code execution failed after %d attempts: %s", maxCodeRetries, lastError)
 }
 
 func (a *AnalystAgent) callSandbox(ctx context.Context, code string) (*SandboxResponse, error) {

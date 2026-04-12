@@ -138,3 +138,41 @@ func (s *Store) IncrementHopCount(ctx context.Context, jobID, sessionID string) 
 	})
 	return newHop, err
 }
+
+// --- Audit Log ---
+
+// AppendAuditLog writes an audit entry to the jobs/{jobID}/audit subcollection
+// and atomically accumulates token_usage on the job document.
+func (s *Store) AppendAuditLog(ctx context.Context, jobID, sessionID string, entry AuditEntry) error {
+	entry.Timestamp = time.Now()
+
+	// Write audit entry to subcollection (outside transaction — append-only, no contention)
+	_, _, err := s.client.Collection("jobs").Doc(jobID).Collection("audit").Add(ctx, entry)
+	if err != nil {
+		return fmt.Errorf("audit log write: %w", err)
+	}
+
+	// Atomically accumulate token usage on the job document
+	if entry.Tokens.TotalTokens > 0 {
+		ref := s.client.Collection("jobs").Doc(jobID)
+		return s.client.RunTransaction(ctx, func(ctx context.Context, tx *firestore.Transaction) error {
+			doc, err := tx.Get(ref)
+			if err != nil {
+				return err
+			}
+			var job Job
+			if err := doc.DataTo(&job); err != nil {
+				return err
+			}
+			if job.SessionID != sessionID {
+				return fmt.Errorf("job %s not found for session %s", jobID, sessionID)
+			}
+			newUsage := job.TokenUsage.Add(entry.Tokens)
+			return tx.Update(ref, []firestore.Update{
+				{Path: "token_usage", Value: newUsage},
+				{Path: "updated_at", Value: time.Now()},
+			})
+		})
+	}
+	return nil
+}

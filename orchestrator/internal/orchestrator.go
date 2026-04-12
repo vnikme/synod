@@ -130,10 +130,16 @@ func (o *OrchestratorAgent) Execute(ctx context.Context, jobID, sessionID string
 	}
 
 	// LLM-driven routing decision
-	decision, err := o.decide(ctx, job, session)
+	decision, routeUsage, err := o.decide(ctx, job, session)
 	if err != nil {
 		return o.failJob(ctx, job, "routing decision failed: "+err.Error())
 	}
+	o.store.AppendAuditLog(ctx, jobID, sessionID, AuditEntry{
+		Agent:  AgentOrchestrator,
+		Action: "route",
+		Tokens: routeUsage,
+		Detail: fmt.Sprintf("next=%s: %s", decision.NextAgent, decision.Reasoning),
+	})
 	slog.Info("orchestrator: routing decision",
 		"job_id", jobID, "next_agent", decision.NextAgent, "reasoning", decision.Reasoning,
 	)
@@ -152,7 +158,12 @@ func (o *OrchestratorAgent) Execute(ctx context.Context, jobID, sessionID string
 		}); err != nil {
 			return fmt.Errorf("update for data agent: %w", err)
 		}
-		if err := o.data.Execute(ctx, job, decision.Instructions, decision.Queries); err != nil {
+		agentUsage, err := o.data.Execute(ctx, job, decision.Instructions, decision.Queries)
+		o.store.AppendAuditLog(ctx, jobID, sessionID, AuditEntry{
+			Agent: AgentData, Action: "execute", Tokens: agentUsage,
+			Detail: fmt.Sprintf("queries=%d", len(decision.Queries)),
+		})
+		if err != nil {
 			slog.Error("data agent failed", "error", err)
 			return o.failJob(ctx, job, "data agent: "+err.Error())
 		}
@@ -165,7 +176,11 @@ func (o *OrchestratorAgent) Execute(ctx context.Context, jobID, sessionID string
 		}); err != nil {
 			return fmt.Errorf("update for analyst: %w", err)
 		}
-		if err := o.analyst.Execute(ctx, job, decision.Instructions); err != nil {
+		agentUsage, err := o.analyst.Execute(ctx, job, decision.Instructions)
+		o.store.AppendAuditLog(ctx, jobID, sessionID, AuditEntry{
+			Agent: AgentAnalyst, Action: "execute", Tokens: agentUsage,
+		})
+		if err != nil {
 			slog.Error("analyst agent failed", "error", err)
 			return o.failJob(ctx, job, "analyst agent: "+err.Error())
 		}
@@ -183,7 +198,11 @@ func (o *OrchestratorAgent) Execute(ctx context.Context, jobID, sessionID string
 		if err != nil {
 			return fmt.Errorf("re-read job for report: %w", err)
 		}
-		if err := o.report.Execute(ctx, job, session, decision.Instructions); err != nil {
+		agentUsage, err := o.report.Execute(ctx, job, session, decision.Instructions)
+		o.store.AppendAuditLog(ctx, jobID, sessionID, AuditEntry{
+			Agent: AgentReport, Action: "execute", Tokens: agentUsage,
+		})
+		if err != nil {
 			slog.Error("report agent failed", "error", err)
 			return o.failJob(ctx, job, "report agent: "+err.Error())
 		}
@@ -214,7 +233,7 @@ func (o *OrchestratorAgent) Execute(ctx context.Context, jobID, sessionID string
 	return nil
 }
 
-func (o *OrchestratorAgent) decide(ctx context.Context, job *Job, session *Session) (*RoutingDecision, error) {
+func (o *OrchestratorAgent) decide(ctx context.Context, job *Job, session *Session) (*RoutingDecision, TokenUsage, error) {
 	state := map[string]any{
 		"prompt":           job.Prompt,
 		"status":           job.Status,
@@ -228,15 +247,16 @@ func (o *OrchestratorAgent) decide(ctx context.Context, job *Job, session *Sessi
 	}
 	stateJSON, err := json.MarshalIndent(state, "", "  ")
 	if err != nil {
-		return nil, fmt.Errorf("marshal orchestrator state: %w", err)
+		return nil, TokenUsage{}, fmt.Errorf("marshal orchestrator state: %w", err)
 	}
 	prompt := fmt.Sprintf("Current job state:\n%s\n\nDecide which agent should act next.", string(stateJSON))
 
 	var decision RoutingDecision
-	if err := o.gemini.GenerateJSON(ctx, orchestratorSystemPrompt, prompt, &decision); err != nil {
-		return nil, err
+	usage, err := o.gemini.GenerateJSON(ctx, orchestratorSystemPrompt, prompt, &decision)
+	if err != nil {
+		return nil, TokenUsage{}, err
 	}
-	return &decision, nil
+	return &decision, usage, nil
 }
 
 func (o *OrchestratorAgent) failJob(ctx context.Context, job *Job, reason string) error {

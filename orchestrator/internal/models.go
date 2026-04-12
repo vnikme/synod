@@ -63,6 +63,7 @@ type Job struct {
 	MissingQueries    []string  `json:"missing_queries" firestore:"missing_queries"`
 	AgentInstructions string    `json:"agent_instructions" firestore:"agent_instructions"`
 	FinalResult       string    `json:"final_result" firestore:"final_result"`
+	TokenUsage        TokenUsage `json:"token_usage" firestore:"token_usage"`
 	CreatedAt         time.Time `json:"created_at" firestore:"created_at"`
 	UpdatedAt         time.Time `json:"updated_at" firestore:"updated_at"`
 }
@@ -100,4 +101,28 @@ type SandboxResponse struct {
 	Stdout  string   `json:"stdout"`
 	Error   string   `json:"error,omitempty"`
 	Charts  []string `json:"charts"`
+}
+
+// --- Token & Audit Tracking ---
+
+type TokenUsage struct {
+	PromptTokens     int `json:"prompt_tokens" firestore:"prompt_tokens"`
+	CompletionTokens int `json:"completion_tokens" firestore:"completion_tokens"`
+	TotalTokens      int `json:"total_tokens" firestore:"total_tokens"`
+}
+
+func (t TokenUsage) Add(other TokenUsage) TokenUsage {
+	return TokenUsage{
+		PromptTokens:     t.PromptTokens + other.PromptTokens,
+		CompletionTokens: t.CompletionTokens + other.CompletionTokens,
+		TotalTokens:      t.TotalTokens + other.TotalTokens,
+	}
+}
+
+type AuditEntry struct {
+	Timestamp time.Time  `json:"timestamp" firestore:"timestamp"`
+	Agent     AgentType  `json:"agent" firestore:"agent"`
+	Action    string     `json:"action" firestore:"action"`
+	Tokens    TokenUsage `json:"tokens" firestore:"tokens"`
+	Detail    string     `json:"detail,omitempty" firestore:"detail,omitempty"`
 }
