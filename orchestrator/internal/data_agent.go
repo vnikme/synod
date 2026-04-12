@@ -123,7 +123,7 @@ func (c *cikCache) populate(ctx context.Context, httpClient *http.Client, userAg
 
 	// Response format: {"0": {"cik_str": 320193, "ticker": "AAPL", "title": "Apple Inc"}, ...}
 	var entries map[string]struct {
-		CIK    int    `json:"cik_str"`
+		CIK    int64  `json:"cik_str"`
 		Ticker string `json:"ticker"`
 		Title  string `json:"title"`
 	}

@@ -112,6 +112,14 @@ func (o *OrchestratorAgent) Execute(ctx context.Context, jobID, sessionID string
 		return nil
 	}
 
+	// Guard: only proceed if the orchestrator is the expected active agent.
+	// Prevents duplicate /internal/route deliveries from overwriting an in-flight agent.
+	if job.ActiveAgent != AgentOrchestrator {
+		slog.Warn("orchestrator: not active agent, skipping duplicate delivery",
+			"job_id", jobID, "active_agent", job.ActiveAgent)
+		return nil
+	}
+
 	// Circuit breaker — atomic increment prevents race from duplicate deliveries
 	newHop, err := o.store.IncrementHopCount(ctx, jobID, sessionID)
 	if err != nil {

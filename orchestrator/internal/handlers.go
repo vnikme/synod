@@ -227,34 +227,18 @@ func (s *Server) handleAgentExec(w http.ResponseWriter, r *http.Request, agent A
 	slog.Info("agent webhook: received", "agent", agent, "job_id", jobID)
 
 	// Read current job state
-	job, err := s.store.GetJob(ctx, jobID, sessionID)
+	// Atomic claim: compare-and-swap QUEUED+agent → IN_PROGRESS.
+	// Prevents duplicate Cloud Tasks deliveries from both executing the agent.
+	job, err := s.store.ClaimQueuedJob(ctx, jobID, sessionID, agent)
 	if err != nil {
-		slog.Error("agent: get job failed", "agent", agent, "job_id", jobID, "error", err)
-		http.Error(w, "get job failed", http.StatusInternalServerError)
+		slog.Error("agent: claim job failed", "agent", agent, "job_id", jobID, "error", err)
+		http.Error(w, "claim job failed", http.StatusInternalServerError)
 		return
 	}
 	if job == nil {
-		slog.Warn("agent: job not found (permanent)", "agent", agent, "job_id", jobID)
-		w.WriteHeader(http.StatusOK) // ACK — don't retry
-		return
-	}
-
-	// Guard: only execute if the job is in the expected state.
-	// Prevents duplicate Cloud Tasks deliveries from re-running the agent.
-	if job.Status != StatusQueued || job.ActiveAgent != agent {
 		slog.Warn("agent: stale/duplicate delivery, skipping",
-			"agent", agent, "job_id", jobID,
-			"status", job.Status, "active_agent", job.ActiveAgent)
+			"agent", agent, "job_id", jobID)
 		w.WriteHeader(http.StatusOK) // ACK — don't retry
-		return
-	}
-
-	// Mark in-progress
-	if err := s.store.UpdateJob(ctx, jobID, sessionID, []firestore.Update{
-		{Path: "status", Value: StatusInProgress},
-	}); err != nil {
-		slog.Error("agent: update status failed", "agent", agent, "error", err)
-		http.Error(w, "update failed", http.StatusInternalServerError)
 		return
 	}
 
@@ -275,9 +259,13 @@ func (s *Server) handleAgentExec(w http.ResponseWriter, r *http.Request, agent A
 	// Handle agent failure — mark job failed, ACK task
 	if agentErr != nil {
 		slog.Error("agent failed", "agent", agent, "job_id", jobID, "error", agentErr)
+		errMsg := agentErr.Error()
+		if len(errMsg) > 200 {
+			errMsg = errMsg[:200] + "…"
+		}
 		if failErr := s.store.UpdateJob(ctx, jobID, sessionID, []firestore.Update{
 			{Path: "status", Value: StatusFailed},
-			{Path: "final_result", Value: fmt.Sprintf("%s agent failed", agent)},
+			{Path: "final_result", Value: fmt.Sprintf("%s agent failed: %s", agent, errMsg)},
 		}); failErr != nil {
 			slog.Error("agent: failJob error", "agent", agent, "error", failErr)
 		}
@@ -299,11 +287,20 @@ func (s *Server) handleAgentExec(w http.ResponseWriter, r *http.Request, agent A
 	}
 
 	// Callback: enqueue orchestrator for next routing decision.
+	// First transition job to QUEUED+orchestrator so that if the enqueue fails,
+	// a future resume/retry mechanism can discover the stranded job and re-enqueue.
+	if err := s.store.UpdateJob(ctx, jobID, sessionID, []firestore.Update{
+		{Path: "status", Value: StatusQueued},
+		{Path: "active_agent", Value: AgentOrchestrator},
+	}); err != nil {
+		slog.Error("agent: callback-pending transition failed", "agent", agent, "error", err)
+		// Job stuck IN_PROGRESS — recoverable by future sweep. ACK the task.
+		w.WriteHeader(http.StatusOK)
+		return
+	}
 	// ACK the task regardless — the agent already succeeded and wrote to Firestore.
-	// If enqueue fails, the orchestrator won't be notified, but the job state is
-	// consistent (IN_PROGRESS). A future resume/retry mechanism can recover.
 	if err := s.dispatcher.Enqueue(ctx, s.selfURL+"/internal/route", jobID, sessionID); err != nil {
-		slog.Error("agent: enqueue callback failed (agent work is persisted)", "agent", agent, "error", err)
+		slog.Error("agent: enqueue callback failed (job is QUEUED, recoverable)", "agent", agent, "error", err)
 	}
 
 	w.WriteHeader(http.StatusOK)
