@@ -173,24 +173,35 @@ func (s *Server) handleReply(w http.ResponseWriter, r *http.Request) {
 	}
 	sessionID := strings.TrimSpace(req.SessionID)
 
-	// Append user reply to chat history first — if this fails, we must not
-	// proceed (the orchestrator would re-route without seeing the reply).
-	if err := s.store.AppendChatHistory(ctx, sessionID, ChatMessage{Role: "user", Content: req.Message}); err != nil {
-		slog.Error("reply: append chat history failed", "error", err)
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal error"})
-		return
-	}
-
 	// Atomic resume: CAS HITL → QUEUED+orchestrator, reset hop_count, clear final_result.
-	// Only one concurrent reply succeeds; others get nil and return 409.
-	job, err := s.store.ResumeHITLJob(ctx, jobID, sessionID)
+	// Only one concurrent reply succeeds; others get the appropriate error.
+	_, result, err := s.store.ResumeHITLJob(ctx, jobID, sessionID)
 	if err != nil {
 		slog.Error("reply: resume job failed", "error", err)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal error"})
 		return
 	}
-	if job == nil {
+	switch result {
+	case ResumeNotFound:
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "job not found"})
+		return
+	case ResumeNotHITL:
 		writeJSON(w, http.StatusConflict, map[string]string{"error": "job is not awaiting user input"})
+		return
+	}
+
+	// Append user reply to chat history after successful resume — avoids mutating
+	// session state on invalid/non-HITL requests. If this fails, roll back.
+	if err := s.store.AppendChatHistory(ctx, sessionID, ChatMessage{Role: "user", Content: req.Message}); err != nil {
+		slog.Error("reply: append chat history failed", "error", err)
+		if rollbackErr := s.store.UpdateJob(ctx, jobID, sessionID, []firestore.Update{
+			{Path: "status", Value: StatusHITL},
+			{Path: "active_agent", Value: AgentOrchestrator},
+			{Path: "final_result", Value: "Your reply could not be saved. Please retry."},
+		}); rollbackErr != nil {
+			slog.Error("reply: rollback to HITL failed", "error", rollbackErr, "job_id", jobID)
+		}
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal error"})
 		return
 	}
 
@@ -200,6 +211,7 @@ func (s *Server) handleReply(w http.ResponseWriter, r *http.Request) {
 		if rollbackErr := s.store.UpdateJob(ctx, jobID, sessionID, []firestore.Update{
 			{Path: "status", Value: StatusHITL},
 			{Path: "active_agent", Value: AgentOrchestrator},
+			{Path: "final_result", Value: "Your reply was received, but resuming the job failed. Please retry."},
 		}); rollbackErr != nil {
 			slog.Error("reply: rollback to HITL failed", "error", rollbackErr, "job_id", jobID)
 		}

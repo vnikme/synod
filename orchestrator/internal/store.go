@@ -181,14 +181,26 @@ func (s *Store) ClaimQueuedJob(ctx context.Context, jobID, sessionID string, age
 
 // --- Audit Log ---
 
+// ResumeResult distinguishes the outcomes of ResumeHITLJob.
+type ResumeResult int
+
+const (
+	ResumeNotFound  ResumeResult = iota // job missing or session mismatch
+	ResumeNotHITL                       // job exists but not in HITL state
+	ResumeSucceeded                     // transition succeeded
+)
+
 // ResumeHITLJob atomically transitions a job from HITL to QUEUED+orchestrator,
-// resets hop_count and clears final_result. Returns the job if resume succeeds,
-// or nil if the job is not in HITL state (concurrent reply already resumed it).
-func (s *Store) ResumeHITLJob(ctx context.Context, jobID, sessionID string) (*Job, error) {
+// resets hop_count and clears final_result. Returns (job, ResumeSucceeded) on
+// success, (nil, ResumeNotFound) if the job is missing/session mismatch, or
+// (nil, ResumeNotHITL) if the job exists but is not in HITL state.
+func (s *Store) ResumeHITLJob(ctx context.Context, jobID, sessionID string) (*Job, ResumeResult, error) {
 	ref := s.client.Collection("jobs").Doc(jobID)
 	var resumed *Job
+	result := ResumeNotFound
 	err := s.client.RunTransaction(ctx, func(ctx context.Context, tx *firestore.Transaction) error {
-		resumed = nil // reset on retry
+		resumed = nil
+		result = ResumeNotFound
 		doc, err := tx.Get(ref)
 		if err != nil {
 			if status.Code(err) == codes.NotFound {
@@ -204,6 +216,7 @@ func (s *Store) ResumeHITLJob(ctx context.Context, jobID, sessionID string) (*Jo
 			return nil
 		}
 		if job.Status != StatusHITL {
+			result = ResumeNotHITL
 			return nil
 		}
 		if err := tx.Update(ref, []firestore.Update{
@@ -220,9 +233,10 @@ func (s *Store) ResumeHITLJob(ctx context.Context, jobID, sessionID string) (*Jo
 		job.HopCount = 0
 		job.FinalResult = ""
 		resumed = &job
+		result = ResumeSucceeded
 		return nil
 	})
-	return resumed, err
+	return resumed, result, err
 }
 
 // AppendAuditLog writes an audit entry to the jobs/{jobID}/audit subcollection
