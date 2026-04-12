@@ -139,6 +139,47 @@ func (s *Store) IncrementHopCount(ctx context.Context, jobID, sessionID string) 
 	return newHop, err
 }
 
+// ClaimQueuedJob atomically transitions a job from QUEUED with the expected
+// active_agent to IN_PROGRESS. Returns the job if the claim succeeds, or nil
+// if the precondition failed (stale/duplicate delivery). This is a
+// compare-and-swap to prevent duplicate Cloud Tasks deliveries from both
+// executing the same agent.
+func (s *Store) ClaimQueuedJob(ctx context.Context, jobID, sessionID string, agent AgentType) (*Job, error) {
+	ref := s.client.Collection("jobs").Doc(jobID)
+	var claimed *Job
+	err := s.client.RunTransaction(ctx, func(ctx context.Context, tx *firestore.Transaction) error {
+		claimed = nil // reset on retry
+		doc, err := tx.Get(ref)
+		if err != nil {
+			if status.Code(err) == codes.NotFound {
+				return nil // job doesn't exist — return nil, nil (ACK)
+			}
+			return err
+		}
+		var job Job
+		if err := doc.DataTo(&job); err != nil {
+			return err
+		}
+		if job.SessionID != sessionID {
+			return nil // session mismatch — treat as not-found (ACK)
+		}
+		if job.Status != StatusQueued || job.ActiveAgent != agent {
+			// Precondition failed — another delivery already claimed this job
+			return nil
+		}
+		if err := tx.Update(ref, []firestore.Update{
+			{Path: "status", Value: StatusInProgress},
+			{Path: "updated_at", Value: time.Now()},
+		}); err != nil {
+			return err
+		}
+		job.Status = StatusInProgress
+		claimed = &job
+		return nil
+	})
+	return claimed, err
+}
+
 // --- Audit Log ---
 
 // AppendAuditLog writes an audit entry to the jobs/{jobID}/audit subcollection

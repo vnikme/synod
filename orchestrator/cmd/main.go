@@ -69,16 +69,15 @@ func main() {
 	}
 	reportAgent := internal.NewReportAgent(gemini, store)
 
-	// Orchestration agent — holds all sub-agents
+	// Orchestration agent — no longer holds sub-agents (async dispatch via Cloud Tasks)
 	orchestrator := internal.NewOrchestratorAgent(
 		gemini, store, dispatcher,
-		dataAgent, analystAgent, reportAgent,
 		selfURL,
 	)
 
-	// HTTP server
+	// HTTP server — receives agent webhook callbacks
 	internalAuth := internal.OIDCAuthMiddleware(selfURL, os.Getenv("SERVICE_ACCOUNT_EMAIL"))
-	server := internal.NewServer(orchestrator, store, dispatcher, selfURL, internalAuth)
+	server := internal.NewServer(orchestrator, dataAgent, analystAgent, reportAgent, store, dispatcher, selfURL, internalAuth)
 
 	port := os.Getenv("PORT")
 	if port == "" {

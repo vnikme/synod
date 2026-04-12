@@ -1,11 +1,14 @@
 package internal
 
 import (
+	"context"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"strings"
 
+	"cloud.google.com/go/firestore"
 	"github.com/google/uuid"
 )
 
@@ -15,6 +18,9 @@ import (
 
 type Server struct {
 	orchestrator *OrchestratorAgent
+	data         *DataAgent
+	analyst      *AnalystAgent
+	report       *ReportAgent
 	store        *Store
 	dispatcher   *Dispatcher
 	selfURL      string
@@ -22,12 +28,20 @@ type Server struct {
 	mux          *http.ServeMux
 }
 
-func NewServer(orchestrator *OrchestratorAgent, store *Store, dispatcher *Dispatcher, selfURL string, internalAuth func(http.Handler) http.Handler) *Server {
+func NewServer(
+	orchestrator *OrchestratorAgent,
+	data *DataAgent, analyst *AnalystAgent, report *ReportAgent,
+	store *Store, dispatcher *Dispatcher,
+	selfURL string, internalAuth func(http.Handler) http.Handler,
+) *Server {
 	if internalAuth == nil {
 		internalAuth = func(next http.Handler) http.Handler { return next }
 	}
 	s := &Server{
 		orchestrator: orchestrator,
+		data:         data,
+		analyst:      analyst,
+		report:       report,
 		store:        store,
 		dispatcher:   dispatcher,
 		selfURL:      selfURL,
@@ -43,6 +57,9 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("POST /api/v1/tasks", s.handleIngest)
 	s.mux.HandleFunc("GET /api/v1/tasks/{jobID}", s.handleStatus)
 	s.mux.Handle("POST /internal/route", s.internalAuth(http.HandlerFunc(s.handleRoute)))
+	s.mux.Handle("POST /internal/agent/data", s.internalAuth(http.HandlerFunc(s.handleAgentData)))
+	s.mux.Handle("POST /internal/agent/analyst", s.internalAuth(http.HandlerFunc(s.handleAgentAnalyst)))
+	s.mux.Handle("POST /internal/agent/report", s.internalAuth(http.HandlerFunc(s.handleAgentReport)))
 }
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -180,4 +197,132 @@ func writeJSON(w http.ResponseWriter, code int, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(code)
 	json.NewEncoder(w).Encode(v)
+}
+
+// parseAgentPayload extracts and validates job_id + session_id from the request body.
+func parseAgentPayload(r *http.Request) (string, string, error) {
+	var payload TaskPayload
+	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+		return "", "", fmt.Errorf("invalid payload: %w", err)
+	}
+	jobID := strings.TrimSpace(payload.JobID)
+	sessionID := strings.TrimSpace(payload.SessionID)
+	if jobID == "" || sessionID == "" {
+		return "", "", fmt.Errorf("job_id and session_id are required")
+	}
+	return jobID, sessionID, nil
+}
+
+// handleAgentExec is the shared pattern for all agent webhook handlers:
+// parse payload → read job → run agent → audit → handle error → callback to orchestrator.
+func (s *Server) handleAgentExec(w http.ResponseWriter, r *http.Request, agent AgentType, run func(ctx context.Context, job *Job) (TokenUsage, error)) {
+	ctx := r.Context()
+
+	jobID, sessionID, err := parseAgentPayload(r)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	slog.Info("agent webhook: received", "agent", agent, "job_id", jobID)
+
+	// Atomic claim: compare-and-swap QUEUED+agent → IN_PROGRESS.
+	// Prevents duplicate Cloud Tasks deliveries from both executing the agent.
+	job, err := s.store.ClaimQueuedJob(ctx, jobID, sessionID, agent)
+	if err != nil {
+		slog.Error("agent: claim job failed", "agent", agent, "job_id", jobID, "error", err)
+		http.Error(w, "claim job failed", http.StatusInternalServerError)
+		return
+	}
+	if job == nil {
+		slog.Warn("agent: stale/duplicate delivery, skipping",
+			"agent", agent, "job_id", jobID)
+		w.WriteHeader(http.StatusOK) // ACK — don't retry
+		return
+	}
+
+	// Execute the agent
+	usage, agentErr := run(ctx, job)
+
+	// Audit
+	detail := "success"
+	if agentErr != nil {
+		detail = agentErr.Error()
+	}
+	if auditErr := s.store.AppendAuditLog(ctx, jobID, sessionID, AuditEntry{
+		Agent: agent, Action: "execute", Tokens: usage, Detail: detail,
+	}); auditErr != nil {
+		slog.Error("audit log failed", "job_id", jobID, "agent", agent, "error", auditErr)
+	}
+
+	// Handle agent failure — mark job failed, ACK task
+	if agentErr != nil {
+		slog.Error("agent failed", "agent", agent, "job_id", jobID, "error", agentErr)
+		errMsg := agentErr.Error()
+		if len(errMsg) > 200 {
+			errMsg = errMsg[:200] + "…"
+		}
+		if failErr := s.store.UpdateJob(ctx, jobID, sessionID, []firestore.Update{
+			{Path: "status", Value: StatusFailed},
+			{Path: "final_result", Value: fmt.Sprintf("%s agent failed: %s", agent, errMsg)},
+		}); failErr != nil {
+			slog.Error("agent: failJob error", "agent", agent, "error", failErr)
+		}
+		w.WriteHeader(http.StatusOK) // ACK — agent failure is permanent
+		return
+	}
+
+	// Re-read job to check if agent set a terminal state (e.g., NEEDS_CONTEXT, COMPLETED)
+	job, err = s.store.GetJob(ctx, jobID, sessionID)
+	if err != nil {
+		slog.Error("agent: re-read job failed", "agent", agent, "error", err)
+		http.Error(w, "re-read job failed", http.StatusInternalServerError)
+		return
+	}
+	if job.Status == StatusCompleted || job.Status == StatusFailed || job.Status == StatusHITL {
+		slog.Info("agent: terminal state", "agent", agent, "job_id", jobID, "status", job.Status)
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+
+	// Callback: enqueue orchestrator for next routing decision.
+	// First transition job to QUEUED+orchestrator so that if the enqueue fails,
+	// a future resume/retry mechanism can discover the stranded job and re-enqueue.
+	if err := s.store.UpdateJob(ctx, jobID, sessionID, []firestore.Update{
+		{Path: "status", Value: StatusQueued},
+		{Path: "active_agent", Value: AgentOrchestrator},
+	}); err != nil {
+		slog.Error("agent: callback-pending transition failed", "agent", agent, "error", err)
+		// Job stuck IN_PROGRESS — recoverable by future sweep. ACK the task.
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+	// ACK the task regardless — the agent already succeeded and wrote to Firestore.
+	if err := s.dispatcher.Enqueue(ctx, s.selfURL+"/internal/route", jobID, sessionID); err != nil {
+		slog.Error("agent: enqueue callback failed (job is QUEUED, recoverable)", "agent", agent, "error", err)
+	}
+
+	w.WriteHeader(http.StatusOK)
+}
+
+func (s *Server) handleAgentData(w http.ResponseWriter, r *http.Request) {
+	s.handleAgentExec(w, r, AgentData, func(ctx context.Context, job *Job) (TokenUsage, error) {
+		return s.data.Execute(ctx, job, job.AgentInstructions, job.MissingQueries)
+	})
+}
+
+func (s *Server) handleAgentAnalyst(w http.ResponseWriter, r *http.Request) {
+	s.handleAgentExec(w, r, AgentAnalyst, func(ctx context.Context, job *Job) (TokenUsage, error) {
+		return s.analyst.Execute(ctx, job, job.AgentInstructions)
+	})
+}
+
+func (s *Server) handleAgentReport(w http.ResponseWriter, r *http.Request) {
+	s.handleAgentExec(w, r, AgentReport, func(ctx context.Context, job *Job) (TokenUsage, error) {
+		session, err := s.store.GetSession(ctx, job.SessionID)
+		if err != nil {
+			return TokenUsage{}, fmt.Errorf("get session: %w", err)
+		}
+		return s.report.Execute(ctx, job, session, job.AgentInstructions)
+	})
 }

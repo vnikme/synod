@@ -8,32 +8,156 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
-	"regexp"
-	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"cloud.google.com/go/firestore"
 )
 
-// Ticker → 10-digit CIK mapping for SEC EDGAR.
-var tickerCIK = map[string]string{
-	"AAPL": "0000320193", "MSFT": "0000789019", "GOOGL": "0001652044",
-	"GOOG": "0001652044", "AMZN": "0001018724", "META": "0001326801",
-	"TSLA": "0001318605", "NVDA": "0001045810", "JPM": "0000019617",
-	"V": "0001403161", "WMT": "0000104169", "JNJ": "0000200406",
-	"UNH": "0000731766", "XOM": "0000034088", "BAC": "0000070858",
-	"PG": "0000080424", "DIS": "0001744489", "NFLX": "0001065280",
+// cikCache holds the dynamically fetched SEC company→CIK mapping.
+// Populated lazily from https://www.sec.gov/files/company_tickers.json
+type cikCache struct {
+	mu       sync.RWMutex
+	byTicker map[string]string // "AAPL" -> "0000320193"
+	byName   map[string]string // "APPLE INC" -> "0000320193"
+	fetched  time.Time
 }
 
-// Company name → CIK for natural language detection.
-var nameCIK = map[string]string{
-	"APPLE": "0000320193", "MICROSOFT": "0000789019",
-	"GOOGLE": "0001652044", "ALPHABET": "0001652044",
-	"AMAZON": "0001018724", "TESLA": "0001318605",
-	"NVIDIA": "0001045810", "JPMORGAN": "0000019617",
-	"WALMART": "0000104169", "NETFLIX": "0001065280",
-	"DISNEY": "0001744489", "PROCTER": "0000080424",
+const cikCacheTTL = 24 * time.Hour
+
+func (c *cikCache) lookup(query string) string {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	upper := strings.ToUpper(query)
+
+	// Check tickers: tokenize query and do direct map lookups — O(#tokens).
+	// Deterministic: returns the first ticker found by position in query.
+	tokens := strings.FieldsFunc(upper, func(r rune) bool {
+		return (r < 'A' || r > 'Z') && (r < '0' || r > '9')
+	})
+	for _, token := range tokens {
+		if cik, ok := c.byTicker[token]; ok {
+			return cik
+		}
+	}
+
+	// Check company names — earliest positional match for determinism.
+	bestPos := -1
+	bestName := ""
+	bestCIK := ""
+	for name, cik := range c.byName {
+		pos := strings.Index(upper, name)
+		if pos == -1 {
+			continue
+		}
+		if bestPos == -1 || pos < bestPos || (pos == bestPos && name < bestName) {
+			bestPos = pos
+			bestName = name
+			bestCIK = cik
+		}
+	}
+	return bestCIK
+}
+
+func (c *cikCache) needsRefresh() bool {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.byTicker == nil || time.Since(c.fetched) > cikCacheTTL
+}
+
+// corporateSuffixes are stripped from SEC titles for fuzzy name matching.
+var corporateSuffixes = []string{
+	" INC.", " INC", " CORP.", " CORP", " CO.", " CO",
+	" LTD.", " LTD", " LP", " L.P.", " LLC", " PLC",
+	" HOLDINGS", " GROUP", " TECHNOLOGIES", " TECHNOLOGY",
+}
+
+// normalizeName strips corporate suffixes and punctuation for fuzzy matching.
+func normalizeName(name string) string {
+	n := strings.ToUpper(strings.TrimSpace(name))
+	for _, suffix := range corporateSuffixes {
+		n = strings.TrimSuffix(n, suffix)
+	}
+	// Strip remaining punctuation
+	n = strings.Map(func(r rune) rune {
+		if (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == ' ' {
+			return r
+		}
+		return -1
+	}, n)
+	return strings.TrimSpace(n)
+}
+
+func (c *cikCache) populate(ctx context.Context, httpClient *http.Client, userAgent string) error {
+	// Quick check under read lock — avoid unnecessary work
+	c.mu.RLock()
+	if c.byTicker != nil && time.Since(c.fetched) <= cikCacheTTL {
+		c.mu.RUnlock()
+		return nil
+	}
+	c.mu.RUnlock()
+
+	ua := strings.TrimSpace(userAgent)
+	if ua == "" {
+		return fmt.Errorf("SEC EDGAR lookup requires SEC_EDGAR_USER_AGENT to be set")
+	}
+
+	// Fetch and parse outside the write lock to avoid blocking lookups
+	req, err := http.NewRequestWithContext(ctx, "GET", "https://www.sec.gov/files/company_tickers.json", nil)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("User-Agent", ua)
+
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("fetch company_tickers.json: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("SEC company_tickers returned %d", resp.StatusCode)
+	}
+
+	// Response format: {"0": {"cik_str": 320193, "ticker": "AAPL", "title": "Apple Inc"}, ...}
+	var entries map[string]struct {
+		CIK    int64  `json:"cik_str"`
+		Ticker string `json:"ticker"`
+		Title  string `json:"title"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&entries); err != nil {
+		return fmt.Errorf("parse company_tickers.json: %w", err)
+	}
+
+	byTicker := make(map[string]string, len(entries))
+	byName := make(map[string]string, len(entries))
+	for _, e := range entries {
+		cik := fmt.Sprintf("%010d", e.CIK)
+		byTicker[strings.ToUpper(e.Ticker)] = cik
+		// Store both the full title and normalized (suffix-stripped) form
+		fullName := strings.ToUpper(e.Title)
+		if _, exists := byName[fullName]; !exists {
+			byName[fullName] = cik
+		}
+		norm := normalizeName(e.Title)
+		if norm != fullName {
+			if _, exists := byName[norm]; !exists {
+				byName[norm] = cik
+			}
+		}
+	}
+
+	// Swap maps in under write lock — minimal lock duration
+	c.mu.Lock()
+	c.byTicker = byTicker
+	c.byName = byName
+	c.fetched = time.Now()
+	c.mu.Unlock()
+
+	slog.Info("SEC CIK cache populated", "tickers", len(byTicker), "names", len(byName))
+	return nil
 }
 
 const factExtractionPrompt = `Extract structured facts from the provided raw data.
@@ -43,33 +167,42 @@ Be precise with numbers. Include units and time periods.
 Limit to the most important 15-20 facts.`
 
 type DataAgent struct {
-	gemini  *GeminiClient
-	store   *Store
-	cseKey  string
-	cseCX   string
-	edgarUA string
-	http    *http.Client
+	gemini   *GeminiClient
+	store    *Store
+	cseKey   string
+	cseCX    string
+	edgarUA  string
+	http     *http.Client
+	cikCache *cikCache
 }
 
 func NewDataAgent(gemini *GeminiClient, store *Store, cseKey, cseCX, edgarUA string) *DataAgent {
 	return &DataAgent{
-		gemini:  gemini,
-		store:   store,
-		cseKey:  cseKey,
-		cseCX:   cseCX,
-		edgarUA: edgarUA,
-		http:    &http.Client{Timeout: 30 * time.Second},
+		gemini:   gemini,
+		store:    store,
+		cseKey:   cseKey,
+		cseCX:    cseCX,
+		edgarUA:  edgarUA,
+		http:     &http.Client{Timeout: 30 * time.Second},
+		cikCache: &cikCache{},
 	}
 }
 
 func (a *DataAgent) Execute(ctx context.Context, job *Job, instructions string, queries []string) (TokenUsage, error) {
 	slog.Info("data agent: starting", "job_id", job.JobID, "num_queries", len(queries))
 
+	// Ensure CIK cache is populated
+	if a.cikCache.needsRefresh() {
+		if err := a.cikCache.populate(ctx, a.http, a.edgarUA); err != nil {
+			slog.Warn("SEC CIK cache refresh failed, EDGAR lookups may miss", "error", err)
+		}
+	}
+
 	var rawChunks []string
 
 	for _, query := range queries {
 		// Try SEC EDGAR if the query mentions a known company
-		if cik := detectCIK(query); cik != "" {
+		if cik := a.cikCache.lookup(query); cik != "" {
 			data, err := a.fetchEDGAR(ctx, cik, query)
 			if err != nil {
 				slog.Warn("EDGAR fetch failed", "query", query, "error", err)
@@ -236,65 +369,4 @@ func (a *DataAgent) fetchEDGAR(ctx context.Context, cik, query string) (string, 
 		}
 	}
 	return sb.String(), nil
-}
-
-// --- Ticker Detection ---
-
-// tickerPatterns is precompiled at init to avoid per-call regex compilation.
-var tickerPatterns = func() map[string]*regexp.Regexp {
-	patterns := make(map[string]*regexp.Regexp, len(tickerCIK))
-	for ticker := range tickerCIK {
-		patterns[ticker] = regexp.MustCompile(`\b` + regexp.QuoteMeta(ticker) + `\b`)
-	}
-	return patterns
-}()
-
-func detectCIK(query string) string {
-	upper := strings.ToUpper(query)
-
-	// Find earliest positional match among tickers for deterministic results
-	// when queries mention multiple companies.
-	type match struct {
-		cik string
-		pos int
-	}
-	var bestTicker *match
-	for ticker, cik := range tickerCIK {
-		loc := tickerPatterns[ticker].FindStringIndex(upper)
-		if loc != nil {
-			if bestTicker == nil || loc[0] < bestTicker.pos {
-				bestTicker = &match{cik: cik, pos: loc[0]}
-			}
-		}
-	}
-	if bestTicker != nil {
-		return bestTicker.cik
-	}
-
-	// Tokenize query for word-boundary matching against company names.
-	tokens := strings.FieldsFunc(upper, func(r rune) bool {
-		return (r < 'A' || r > 'Z') && (r < '0' || r > '9')
-	})
-	tokenStr := " " + strings.Join(tokens, " ") + " "
-
-	// Deterministic: sort names and return earliest positional match.
-	names := make([]string, 0, len(nameCIK))
-	for name := range nameCIK {
-		names = append(names, name)
-	}
-	sort.Strings(names)
-
-	var bestName *match
-	for _, name := range names {
-		idx := strings.Index(tokenStr, " "+name+" ")
-		if idx >= 0 {
-			if bestName == nil || idx < bestName.pos {
-				bestName = &match{cik: nameCIK[name], pos: idx}
-			}
-		}
-	}
-	if bestName != nil {
-		return bestName.cik
-	}
-	return ""
 }
