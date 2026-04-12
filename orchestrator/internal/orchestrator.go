@@ -134,12 +134,14 @@ func (o *OrchestratorAgent) Execute(ctx context.Context, jobID, sessionID string
 	if err != nil {
 		return o.failJob(ctx, job, "routing decision failed: "+err.Error())
 	}
-	o.store.AppendAuditLog(ctx, jobID, sessionID, AuditEntry{
+	if err := o.store.AppendAuditLog(ctx, jobID, sessionID, AuditEntry{
 		Agent:  AgentOrchestrator,
 		Action: "route",
 		Tokens: routeUsage,
 		Detail: fmt.Sprintf("next=%s: %s", decision.NextAgent, decision.Reasoning),
-	})
+	}); err != nil {
+		slog.Error("audit log failed", "job_id", jobID, "agent", "orchestrator", "error", err)
+	}
 	slog.Info("orchestrator: routing decision",
 		"job_id", jobID, "next_agent", decision.NextAgent, "reasoning", decision.Reasoning,
 	)
@@ -159,10 +161,12 @@ func (o *OrchestratorAgent) Execute(ctx context.Context, jobID, sessionID string
 			return fmt.Errorf("update for data agent: %w", err)
 		}
 		agentUsage, err := o.data.Execute(ctx, job, decision.Instructions, decision.Queries)
-		o.store.AppendAuditLog(ctx, jobID, sessionID, AuditEntry{
+		if auditErr := o.store.AppendAuditLog(ctx, jobID, sessionID, AuditEntry{
 			Agent: AgentData, Action: "execute", Tokens: agentUsage,
 			Detail: fmt.Sprintf("queries=%d", len(decision.Queries)),
-		})
+		}); auditErr != nil {
+			slog.Error("audit log failed", "job_id", jobID, "agent", "data", "error", auditErr)
+		}
 		if err != nil {
 			slog.Error("data agent failed", "error", err)
 			return o.failJob(ctx, job, "data agent: "+err.Error())
@@ -177,9 +181,11 @@ func (o *OrchestratorAgent) Execute(ctx context.Context, jobID, sessionID string
 			return fmt.Errorf("update for analyst: %w", err)
 		}
 		agentUsage, err := o.analyst.Execute(ctx, job, decision.Instructions)
-		o.store.AppendAuditLog(ctx, jobID, sessionID, AuditEntry{
+		if auditErr := o.store.AppendAuditLog(ctx, jobID, sessionID, AuditEntry{
 			Agent: AgentAnalyst, Action: "execute", Tokens: agentUsage,
-		})
+		}); auditErr != nil {
+			slog.Error("audit log failed", "job_id", jobID, "agent", "analyst", "error", auditErr)
+		}
 		if err != nil {
 			slog.Error("analyst agent failed", "error", err)
 			return o.failJob(ctx, job, "analyst agent: "+err.Error())
@@ -199,9 +205,11 @@ func (o *OrchestratorAgent) Execute(ctx context.Context, jobID, sessionID string
 			return fmt.Errorf("re-read job for report: %w", err)
 		}
 		agentUsage, err := o.report.Execute(ctx, job, session, decision.Instructions)
-		o.store.AppendAuditLog(ctx, jobID, sessionID, AuditEntry{
+		if auditErr := o.store.AppendAuditLog(ctx, jobID, sessionID, AuditEntry{
 			Agent: AgentReport, Action: "execute", Tokens: agentUsage,
-		})
+		}); auditErr != nil {
+			slog.Error("audit log failed", "job_id", jobID, "agent", "report", "error", auditErr)
+		}
 		if err != nil {
 			slog.Error("report agent failed", "error", err)
 			return o.failJob(ctx, job, "report agent: "+err.Error())
@@ -254,7 +262,7 @@ func (o *OrchestratorAgent) decide(ctx context.Context, job *Job, session *Sessi
 	var decision RoutingDecision
 	usage, err := o.gemini.GenerateJSON(ctx, orchestratorSystemPrompt, prompt, &decision)
 	if err != nil {
-		return nil, TokenUsage{}, err
+		return nil, usage, err
 	}
 	return &decision, usage, nil
 }

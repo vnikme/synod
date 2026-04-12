@@ -107,7 +107,7 @@ func (a *DataAgent) Execute(ctx context.Context, job *Job, instructions string, 
 	var facts []Fact
 	usage, err := a.gemini.GenerateJSON(ctx, factExtractionPrompt, prompt, &facts)
 	if err != nil {
-		return TokenUsage{}, fmt.Errorf("fact extraction: %w", err)
+		return usage, fmt.Errorf("fact extraction: %w", err)
 	}
 
 	allFacts := append(job.CollectedFacts, facts...)
