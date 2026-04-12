@@ -96,7 +96,7 @@ func (o *OrchestratorAgent) Execute(ctx context.Context, jobID, sessionID string
 	}
 
 	// Circuit breaker — atomic increment prevents race from duplicate deliveries
-	newHop, err := o.store.IncrementHopCount(ctx, jobID, sessionID, maxHops)
+	newHop, err := o.store.IncrementHopCount(ctx, jobID, sessionID)
 	if err != nil {
 		return fmt.Errorf("increment hop count: %w", err)
 	}
@@ -207,7 +207,10 @@ func (o *OrchestratorAgent) decide(ctx context.Context, job *Job, session *Sessi
 	if session != nil && len(session.ChatHistory) > 0 {
 		state["chat_history"] = session.ChatHistory
 	}
-	stateJSON, _ := json.MarshalIndent(state, "", "  ")
+	stateJSON, err := json.MarshalIndent(state, "", "  ")
+	if err != nil {
+		return nil, fmt.Errorf("marshal orchestrator state: %w", err)
+	}
 	prompt := fmt.Sprintf("Current job state:\n%s\n\nDecide which agent should act next.", string(stateJSON))
 
 	var decision RoutingDecision

@@ -114,7 +114,7 @@ func (s *Store) UpdateJob(ctx context.Context, jobID, sessionID string, updates 
 
 // IncrementHopCount atomically increments the hop count and returns the new value.
 // This prevents race conditions from concurrent Cloud Tasks deliveries.
-func (s *Store) IncrementHopCount(ctx context.Context, jobID, sessionID string, maxHops int) (int, error) {
+func (s *Store) IncrementHopCount(ctx context.Context, jobID, sessionID string) (int, error) {
 	ref := s.client.Collection("jobs").Doc(jobID)
 	var newHop int
 	err := s.client.RunTransaction(ctx, func(ctx context.Context, tx *firestore.Transaction) error {

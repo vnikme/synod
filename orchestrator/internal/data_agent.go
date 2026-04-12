@@ -238,12 +238,19 @@ func (a *DataAgent) fetchEDGAR(ctx context.Context, cik, query string) (string, 
 
 // --- Ticker Detection ---
 
+// tickerPatterns is precompiled at init to avoid per-call regex compilation.
+var tickerPatterns = func() map[string]*regexp.Regexp {
+	patterns := make(map[string]*regexp.Regexp, len(tickerCIK))
+	for ticker := range tickerCIK {
+		patterns[ticker] = regexp.MustCompile(`\b` + regexp.QuoteMeta(ticker) + `\b`)
+	}
+	return patterns
+}()
+
 func detectCIK(query string) string {
 	upper := strings.ToUpper(query)
 	for ticker, cik := range tickerCIK {
-		// Use word boundary regex to avoid false positives (e.g., "V" matching "every")
-		pattern := regexp.MustCompile(`\b` + regexp.QuoteMeta(ticker) + `\b`)
-		if pattern.MatchString(upper) {
+		if tickerPatterns[ticker].MatchString(upper) {
 			return cik
 		}
 	}

@@ -1,5 +1,5 @@
 from fastapi import FastAPI
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from app.executor import execute_code
 
@@ -14,7 +14,7 @@ class ExecuteResponse(BaseModel):
     success: bool
     stdout: str = ""
     error: str = ""
-    charts: list[str] = []
+    charts: list[str] = Field(default_factory=list)
 
 
 @app.get("/health")
