@@ -180,7 +180,11 @@ func (o *OrchestratorAgent) Execute(ctx context.Context, jobID, sessionID string
 		}); err != nil {
 			return fmt.Errorf("update for data agent: %w", err)
 		}
-		return o.dispatcher.Enqueue(ctx, o.selfURL+"/internal/agent/data", jobID, sessionID)
+		if err := o.dispatcher.Enqueue(ctx, o.selfURL+"/internal/agent/data", jobID, sessionID); err != nil {
+			o.revertDispatch(ctx, jobID, sessionID, AgentData, err)
+			return fmt.Errorf("enqueue data agent: %w", err)
+		}
+		return nil
 
 	case "analyst":
 		if err := o.store.UpdateJob(ctx, jobID, sessionID, []firestore.Update{
@@ -190,7 +194,11 @@ func (o *OrchestratorAgent) Execute(ctx context.Context, jobID, sessionID string
 		}); err != nil {
 			return fmt.Errorf("update for analyst: %w", err)
 		}
-		return o.dispatcher.Enqueue(ctx, o.selfURL+"/internal/agent/analyst", jobID, sessionID)
+		if err := o.dispatcher.Enqueue(ctx, o.selfURL+"/internal/agent/analyst", jobID, sessionID); err != nil {
+			o.revertDispatch(ctx, jobID, sessionID, AgentAnalyst, err)
+			return fmt.Errorf("enqueue analyst: %w", err)
+		}
+		return nil
 
 	case "report":
 		if err := o.store.UpdateJob(ctx, jobID, sessionID, []firestore.Update{
@@ -200,7 +208,11 @@ func (o *OrchestratorAgent) Execute(ctx context.Context, jobID, sessionID string
 		}); err != nil {
 			return fmt.Errorf("update for report: %w", err)
 		}
-		return o.dispatcher.Enqueue(ctx, o.selfURL+"/internal/agent/report", jobID, sessionID)
+		if err := o.dispatcher.Enqueue(ctx, o.selfURL+"/internal/agent/report", jobID, sessionID); err != nil {
+			o.revertDispatch(ctx, jobID, sessionID, AgentReport, err)
+			return fmt.Errorf("enqueue report: %w", err)
+		}
+		return nil
 
 	case "ask_user":
 		slog.Info("orchestrator: HITL — asking user for clarification", "job_id", jobID)
@@ -251,6 +263,20 @@ func (o *OrchestratorAgent) failJob(ctx context.Context, job *Job, reason string
 		{Path: "status", Value: StatusFailed},
 		{Path: "final_result", Value: reason},
 	})
+}
+
+// revertDispatch rolls the job back to QUEUED+orchestrator after a failed
+// Enqueue. This allows the Cloud Tasks retry of /internal/route to re-execute
+// the routing decision instead of being blocked by the active_agent guard.
+func (o *OrchestratorAgent) revertDispatch(ctx context.Context, jobID, sessionID string, agent AgentType, enqueueErr error) {
+	if revertErr := o.store.UpdateJob(ctx, jobID, sessionID, []firestore.Update{
+		{Path: "status", Value: StatusQueued},
+		{Path: "active_agent", Value: AgentOrchestrator},
+	}); revertErr != nil {
+		slog.Error("orchestrator: revert after enqueue failure also failed",
+			"job_id", jobID, "agent", agent,
+			"enqueue_error", enqueueErr, "revert_error", revertErr)
+	}
 }
 
 func assetSummaries(assets []Asset) []map[string]string {

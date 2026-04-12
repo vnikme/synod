@@ -226,7 +226,6 @@ func (s *Server) handleAgentExec(w http.ResponseWriter, r *http.Request, agent A
 
 	slog.Info("agent webhook: received", "agent", agent, "job_id", jobID)
 
-	// Read current job state
 	// Atomic claim: compare-and-swap QUEUED+agent → IN_PROGRESS.
 	// Prevents duplicate Cloud Tasks deliveries from both executing the agent.
 	job, err := s.store.ClaimQueuedJob(ctx, jobID, sessionID, agent)
