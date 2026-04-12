@@ -132,7 +132,6 @@ func (s *Store) IncrementHopCount(ctx context.Context, jobID, sessionID string) 
 		newHop = job.HopCount + 1
 		return tx.Update(ref, []firestore.Update{
 			{Path: "hop_count", Value: newHop},
-			{Path: "active_agent", Value: AgentOrchestrator},
 			{Path: "updated_at", Value: time.Now()},
 		})
 	})
@@ -181,6 +180,64 @@ func (s *Store) ClaimQueuedJob(ctx context.Context, jobID, sessionID string, age
 }
 
 // --- Audit Log ---
+
+// ResumeResult distinguishes the outcomes of ResumeHITLJob.
+type ResumeResult int
+
+const (
+	ResumeNotFound  ResumeResult = iota // job missing or session mismatch
+	ResumeNotHITL                       // job exists but not in HITL state
+	ResumeSucceeded                     // transition succeeded
+)
+
+// ResumeHITLJob atomically transitions a job from HITL to QUEUED+orchestrator,
+// resets hop_count and clears final_result. Returns (job, ResumeSucceeded) on
+// success, (nil, ResumeNotFound) if the job is missing/session mismatch, or
+// (nil, ResumeNotHITL) if the job exists but is not in HITL state.
+func (s *Store) ResumeHITLJob(ctx context.Context, jobID, sessionID string) (*Job, ResumeResult, error) {
+	ref := s.client.Collection("jobs").Doc(jobID)
+	var resumed *Job
+	result := ResumeNotFound
+	err := s.client.RunTransaction(ctx, func(ctx context.Context, tx *firestore.Transaction) error {
+		resumed = nil
+		result = ResumeNotFound
+		doc, err := tx.Get(ref)
+		if err != nil {
+			if status.Code(err) == codes.NotFound {
+				return nil
+			}
+			return err
+		}
+		var job Job
+		if err := doc.DataTo(&job); err != nil {
+			return err
+		}
+		if job.SessionID != sessionID {
+			return nil
+		}
+		if job.Status != StatusHITL {
+			result = ResumeNotHITL
+			return nil
+		}
+		if err := tx.Update(ref, []firestore.Update{
+			{Path: "status", Value: StatusQueued},
+			{Path: "active_agent", Value: AgentOrchestrator},
+			{Path: "final_result", Value: ""},
+			{Path: "hop_count", Value: 0},
+			{Path: "updated_at", Value: time.Now()},
+		}); err != nil {
+			return err
+		}
+		job.Status = StatusQueued
+		job.ActiveAgent = AgentOrchestrator
+		job.HopCount = 0
+		job.FinalResult = ""
+		resumed = &job
+		result = ResumeSucceeded
+		return nil
+	})
+	return resumed, result, err
+}
 
 // AppendAuditLog writes an audit entry to the jobs/{jobID}/audit subcollection
 // and atomically accumulates token_usage on the job document (when tokens > 0).

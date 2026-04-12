@@ -9,7 +9,6 @@ type JobStatus string
 const (
 	StatusQueued     JobStatus = "QUEUED"
 	StatusInProgress JobStatus = "IN_PROGRESS"
-	StatusNeedsCtx   JobStatus = "NEEDS_CONTEXT"
 	StatusHITL       JobStatus = "HITL"
 	StatusCompleted  JobStatus = "COMPLETED"
 	StatusFailed     JobStatus = "FAILED"
@@ -78,6 +77,11 @@ type Session struct {
 type IngestRequest struct {
 	Prompt    string `json:"prompt"`
 	SessionID string `json:"session_id,omitempty"`
+}
+
+type ReplyRequest struct {
+	Message   string `json:"message"`
+	SessionID string `json:"session_id"`
 }
 
 type IngestResponse struct {
