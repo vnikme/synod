@@ -121,6 +121,7 @@ func (o *OrchestratorAgent) Execute(ctx context.Context, jobID, sessionID string
 		slog.Warn("circuit breaker triggered", "job_id", jobID, "hop_count", newHop)
 		return o.store.UpdateJob(ctx, jobID, sessionID, []firestore.Update{
 			{Path: "status", Value: StatusHITL},
+			{Path: "active_agent", Value: AgentOrchestrator},
 			{Path: "final_result", Value: "Maximum processing steps reached. Please refine your request or provide additional context."},
 		})
 	}

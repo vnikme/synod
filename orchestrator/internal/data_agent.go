@@ -32,20 +32,33 @@ func (c *cikCache) lookup(query string) string {
 
 	upper := strings.ToUpper(query)
 
-	// Check tickers — look for exact word boundary match
-	for ticker, cik := range c.byTicker {
-		if strings.Contains(" "+upper+" ", " "+ticker+" ") {
+	// Check tickers: tokenize query and do direct map lookups — O(#tokens).
+	// Deterministic: returns the first ticker found by position in query.
+	tokens := strings.FieldsFunc(upper, func(r rune) bool {
+		return (r < 'A' || r > 'Z') && (r < '0' || r > '9')
+	})
+	for _, token := range tokens {
+		if cik, ok := c.byTicker[token]; ok {
 			return cik
 		}
 	}
 
-	// Check company names — substring match
+	// Check company names — earliest positional match for determinism.
+	bestPos := -1
+	bestName := ""
+	bestCIK := ""
 	for name, cik := range c.byName {
-		if strings.Contains(upper, name) {
-			return cik
+		pos := strings.Index(upper, name)
+		if pos == -1 {
+			continue
+		}
+		if bestPos == -1 || pos < bestPos || (pos == bestPos && name < bestName) {
+			bestPos = pos
+			bestName = name
+			bestCIK = cik
 		}
 	}
-	return ""
+	return bestCIK
 }
 
 func (c *cikCache) needsRefresh() bool {
@@ -54,22 +67,47 @@ func (c *cikCache) needsRefresh() bool {
 	return c.byTicker == nil || time.Since(c.fetched) > cikCacheTTL
 }
 
-func (c *cikCache) populate(ctx context.Context, httpClient *http.Client, userAgent string) error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
+// corporateSuffixes are stripped from SEC titles for fuzzy name matching.
+var corporateSuffixes = []string{
+	" INC.", " INC", " CORP.", " CORP", " CO.", " CO",
+	" LTD.", " LTD", " LP", " L.P.", " LLC", " PLC",
+	" HOLDINGS", " GROUP", " TECHNOLOGIES", " TECHNOLOGY",
+}
 
-	// Double-check after acquiring write lock
+// normalizeName strips corporate suffixes and punctuation for fuzzy matching.
+func normalizeName(name string) string {
+	n := strings.ToUpper(strings.TrimSpace(name))
+	for _, suffix := range corporateSuffixes {
+		n = strings.TrimSuffix(n, suffix)
+	}
+	// Strip remaining punctuation
+	n = strings.Map(func(r rune) rune {
+		if (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == ' ' {
+			return r
+		}
+		return -1
+	}, n)
+	return strings.TrimSpace(n)
+}
+
+func (c *cikCache) populate(ctx context.Context, httpClient *http.Client, userAgent string) error {
+	// Quick check under read lock — avoid unnecessary work
+	c.mu.RLock()
 	if c.byTicker != nil && time.Since(c.fetched) <= cikCacheTTL {
+		c.mu.RUnlock()
 		return nil
 	}
+	c.mu.RUnlock()
 
+	ua := strings.TrimSpace(userAgent)
+	if ua == "" {
+		return fmt.Errorf("SEC EDGAR lookup requires SEC_EDGAR_USER_AGENT to be set")
+	}
+
+	// Fetch and parse outside the write lock to avoid blocking lookups
 	req, err := http.NewRequestWithContext(ctx, "GET", "https://www.sec.gov/files/company_tickers.json", nil)
 	if err != nil {
 		return err
-	}
-	ua := userAgent
-	if ua == "" {
-		ua = "Synod/1.0 (synod@example.com)"
 	}
 	req.Header.Set("User-Agent", ua)
 
@@ -98,16 +136,26 @@ func (c *cikCache) populate(ctx context.Context, httpClient *http.Client, userAg
 	for _, e := range entries {
 		cik := fmt.Sprintf("%010d", e.CIK)
 		byTicker[strings.ToUpper(e.Ticker)] = cik
-		// Use first word(s) of title for name matching
-		name := strings.ToUpper(e.Title)
-		if _, exists := byName[name]; !exists {
-			byName[name] = cik
+		// Store both the full title and normalized (suffix-stripped) form
+		fullName := strings.ToUpper(e.Title)
+		if _, exists := byName[fullName]; !exists {
+			byName[fullName] = cik
+		}
+		norm := normalizeName(e.Title)
+		if norm != fullName {
+			if _, exists := byName[norm]; !exists {
+				byName[norm] = cik
+			}
 		}
 	}
 
+	// Swap maps in under write lock — minimal lock duration
+	c.mu.Lock()
 	c.byTicker = byTicker
 	c.byName = byName
 	c.fetched = time.Now()
+	c.mu.Unlock()
+
 	slog.Info("SEC CIK cache populated", "tickers", len(byTicker), "names", len(byName))
 	return nil
 }

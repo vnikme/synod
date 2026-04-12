@@ -239,6 +239,16 @@ func (s *Server) handleAgentExec(w http.ResponseWriter, r *http.Request, agent A
 		return
 	}
 
+	// Guard: only execute if the job is in the expected state.
+	// Prevents duplicate Cloud Tasks deliveries from re-running the agent.
+	if job.Status != StatusQueued || job.ActiveAgent != agent {
+		slog.Warn("agent: stale/duplicate delivery, skipping",
+			"agent", agent, "job_id", jobID,
+			"status", job.Status, "active_agent", job.ActiveAgent)
+		w.WriteHeader(http.StatusOK) // ACK — don't retry
+		return
+	}
+
 	// Mark in-progress
 	if err := s.store.UpdateJob(ctx, jobID, sessionID, []firestore.Update{
 		{Path: "status", Value: StatusInProgress},
@@ -267,7 +277,7 @@ func (s *Server) handleAgentExec(w http.ResponseWriter, r *http.Request, agent A
 		slog.Error("agent failed", "agent", agent, "job_id", jobID, "error", agentErr)
 		if failErr := s.store.UpdateJob(ctx, jobID, sessionID, []firestore.Update{
 			{Path: "status", Value: StatusFailed},
-			{Path: "final_result", Value: fmt.Sprintf("%s agent: %s", agent, agentErr.Error())},
+			{Path: "final_result", Value: fmt.Sprintf("%s agent failed", agent)},
 		}); failErr != nil {
 			slog.Error("agent: failJob error", "agent", agent, "error", failErr)
 		}
@@ -288,11 +298,12 @@ func (s *Server) handleAgentExec(w http.ResponseWriter, r *http.Request, agent A
 		return
 	}
 
-	// Callback: enqueue orchestrator for next routing decision
+	// Callback: enqueue orchestrator for next routing decision.
+	// ACK the task regardless — the agent already succeeded and wrote to Firestore.
+	// If enqueue fails, the orchestrator won't be notified, but the job state is
+	// consistent (IN_PROGRESS). A future resume/retry mechanism can recover.
 	if err := s.dispatcher.Enqueue(ctx, s.selfURL+"/internal/route", jobID, sessionID); err != nil {
-		slog.Error("agent: enqueue callback failed", "agent", agent, "error", err)
-		http.Error(w, "enqueue callback failed", http.StatusInternalServerError)
-		return
+		slog.Error("agent: enqueue callback failed (agent work is persisted)", "agent", agent, "error", err)
 	}
 
 	w.WriteHeader(http.StatusOK)
