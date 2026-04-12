@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"cloud.google.com/go/firestore"
+	"google.golang.org/api/idtoken"
 )
 
 const maxCodeRetries = 3
@@ -39,13 +40,22 @@ type AnalystAgent struct {
 	http       *http.Client
 }
 
-func NewAnalystAgent(gemini *GeminiClient, store *Store, sandboxURL string) *AnalystAgent {
+func NewAnalystAgent(gemini *GeminiClient, store *Store, sandboxURL string) (*AnalystAgent, error) {
+	// Create an HTTP client that automatically adds ID tokens for Cloud Run auth.
+	// Falls back to a plain client if no credentials are available (local dev).
+	httpClient, err := idtoken.NewClient(context.Background(), sandboxURL)
+	if err != nil {
+		slog.Warn("idtoken client unavailable, using plain HTTP (sandbox must allow unauthenticated)", "error", err)
+		httpClient = &http.Client{Timeout: 60 * time.Second}
+	} else {
+		httpClient.Timeout = 60 * time.Second
+	}
 	return &AnalystAgent{
 		gemini:     gemini,
 		store:      store,
 		sandboxURL: sandboxURL,
-		http:       &http.Client{Timeout: 60 * time.Second},
-	}
+		http:       httpClient,
+	}, nil
 }
 
 func (a *AnalystAgent) Execute(ctx context.Context, job *Job, instructions string) error {

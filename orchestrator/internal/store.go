@@ -49,10 +49,21 @@ func (s *Store) GetSession(ctx context.Context, sessionID string) (*Session, err
 }
 
 func (s *Store) AppendChatHistory(ctx context.Context, sessionID string, msg ChatMessage) error {
-	_, err := s.client.Collection("sessions").Doc(sessionID).Update(ctx, []firestore.Update{
-		{Path: "chat_history", Value: firestore.ArrayUnion(msg)},
+	ref := s.client.Collection("sessions").Doc(sessionID)
+	return s.client.RunTransaction(ctx, func(ctx context.Context, tx *firestore.Transaction) error {
+		doc, err := tx.Get(ref)
+		if err != nil {
+			return err
+		}
+		var sess Session
+		if err := doc.DataTo(&sess); err != nil {
+			return err
+		}
+		sess.ChatHistory = append(sess.ChatHistory, msg)
+		return tx.Update(ref, []firestore.Update{
+			{Path: "chat_history", Value: sess.ChatHistory},
+		})
 	})
-	return err
 }
 
 // --- Jobs ---
@@ -83,14 +94,47 @@ func (s *Store) GetJob(ctx context.Context, jobID, sessionID string) (*Job, erro
 }
 
 func (s *Store) UpdateJob(ctx context.Context, jobID, sessionID string, updates []firestore.Update) error {
-	job, err := s.GetJob(ctx, jobID, sessionID)
-	if err != nil {
-		return err
-	}
-	if job == nil {
-		return fmt.Errorf("job %s not found for session %s", jobID, sessionID)
-	}
-	updates = append(updates, firestore.Update{Path: "updated_at", Value: time.Now()})
-	_, err = s.client.Collection("jobs").Doc(jobID).Update(ctx, updates)
-	return err
+	ref := s.client.Collection("jobs").Doc(jobID)
+	return s.client.RunTransaction(ctx, func(ctx context.Context, tx *firestore.Transaction) error {
+		doc, err := tx.Get(ref)
+		if err != nil {
+			return err
+		}
+		var job Job
+		if err := doc.DataTo(&job); err != nil {
+			return err
+		}
+		if job.SessionID != sessionID {
+			return fmt.Errorf("job %s not found for session %s", jobID, sessionID)
+		}
+		updates = append(updates, firestore.Update{Path: "updated_at", Value: time.Now()})
+		return tx.Update(ref, updates)
+	})
+}
+
+// IncrementHopCount atomically increments the hop count and returns the new value.
+// This prevents race conditions from concurrent Cloud Tasks deliveries.
+func (s *Store) IncrementHopCount(ctx context.Context, jobID, sessionID string, maxHops int) (int, error) {
+	ref := s.client.Collection("jobs").Doc(jobID)
+	var newHop int
+	err := s.client.RunTransaction(ctx, func(ctx context.Context, tx *firestore.Transaction) error {
+		doc, err := tx.Get(ref)
+		if err != nil {
+			return err
+		}
+		var job Job
+		if err := doc.DataTo(&job); err != nil {
+			return err
+		}
+		if job.SessionID != sessionID {
+			return fmt.Errorf("job %s not found for session %s", jobID, sessionID)
+		}
+		newHop = job.HopCount + 1
+		return tx.Update(ref, []firestore.Update{
+			{Path: "hop_count", Value: newHop},
+			{Path: "active_agent", Value: AgentOrchestrator},
+			{Path: "updated_at", Value: time.Now()},
+		})
+	})
+	return newHop, err
 }

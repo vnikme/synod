@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strings"
 	"time"
 
@@ -227,7 +228,7 @@ func (a *DataAgent) fetchEDGAR(ctx context.Context, cik, query string) (string, 
 			}
 			sb.WriteString(fmt.Sprintf("%s (%s):\n", entry.Label, unit))
 			for _, e := range entries[start:] {
-				sb.WriteString(fmt.Sprintf("  %s (FY%d %s, %s): %.0f\n", e.End, e.FY, e.FP, e.Form, e.Val))
+				sb.WriteString(fmt.Sprintf("  %s (FY%d %s, %s): %g\n", e.End, e.FY, e.FP, e.Form, e.Val))
 			}
 			sb.WriteString("\n")
 		}
@@ -240,7 +241,9 @@ func (a *DataAgent) fetchEDGAR(ctx context.Context, cik, query string) (string, 
 func detectCIK(query string) string {
 	upper := strings.ToUpper(query)
 	for ticker, cik := range tickerCIK {
-		if strings.Contains(upper, ticker) {
+		// Use word boundary regex to avoid false positives (e.g., "V" matching "every")
+		pattern := regexp.MustCompile(`\b` + regexp.QuoteMeta(ticker) + `\b`)
+		if pattern.MatchString(upper) {
 			return cik
 		}
 	}

@@ -20,7 +20,10 @@ func main() {
 	defer cancel()
 
 	// Validate critical env vars
-	for _, v := range []string{"GCP_PROJECT_ID", "GEMINI_API_KEY", "ORCHESTRATOR_BASE_URL", "SANDBOX_URL"} {
+	for _, v := range []string{
+		"GCP_PROJECT_ID", "GEMINI_API_KEY", "ORCHESTRATOR_BASE_URL", "SANDBOX_URL",
+		"CLOUD_TASKS_LOCATION", "CLOUD_TASKS_QUEUE", "SERVICE_ACCOUNT_EMAIL",
+	} {
 		if os.Getenv(v) == "" {
 			slog.Error("missing required environment variable", "var", v)
 			os.Exit(1)
@@ -59,7 +62,11 @@ func main() {
 		os.Getenv("GOOGLE_CSE_CX"),
 		os.Getenv("SEC_EDGAR_USER_AGENT"),
 	)
-	analystAgent := internal.NewAnalystAgent(gemini, store, sandboxURL)
+	analystAgent, err := internal.NewAnalystAgent(gemini, store, sandboxURL)
+	if err != nil {
+		slog.Error("analyst agent init failed", "error", err)
+		os.Exit(1)
+	}
 	reportAgent := internal.NewReportAgent(gemini, store)
 
 	// Orchestration agent — holds all sub-agents

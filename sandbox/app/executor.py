@@ -145,12 +145,12 @@ def execute_code(code: str, timeout: int = 30) -> dict:
             "charts": [],
         }
 
-    if queue.empty():
+    try:
+        return queue.get(timeout=5)
+    except Exception:
         return {
             "success": False,
             "stdout": "",
             "error": "Execution produced no result (process may have crashed)",
             "charts": [],
         }
-
-    return queue.get()

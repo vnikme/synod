@@ -143,7 +143,10 @@ func (s *Server) handleRoute(w http.ResponseWriter, r *http.Request) {
 
 	if err := s.orchestrator.Execute(ctx, payload.JobID, payload.SessionID); err != nil {
 		slog.Error("orchestrator execution failed", "job_id", payload.JobID, "error", err)
-		// Return 200 to prevent Cloud Tasks retries — job is marked FAILED internally.
+		// Return 500 so Cloud Tasks retries on transient errors.
+		// Agent-level failures are handled internally (failJob marks FAILED and returns nil).
+		http.Error(w, "orchestrator error", http.StatusInternalServerError)
+		return
 	}
 
 	w.WriteHeader(http.StatusOK)

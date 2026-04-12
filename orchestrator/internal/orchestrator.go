@@ -95,21 +95,16 @@ func (o *OrchestratorAgent) Execute(ctx context.Context, jobID, sessionID string
 		return nil
 	}
 
-	// Circuit breaker
-	newHop := job.HopCount + 1
+	// Circuit breaker — atomic increment prevents race from duplicate deliveries
+	newHop, err := o.store.IncrementHopCount(ctx, jobID, sessionID, maxHops)
+	if err != nil {
+		return fmt.Errorf("increment hop count: %w", err)
+	}
 	if newHop > maxHops {
 		slog.Warn("circuit breaker triggered", "job_id", jobID, "hop_count", newHop)
 		return o.store.UpdateJob(ctx, jobID, sessionID, []firestore.Update{
 			{Path: "status", Value: StatusHITL},
-			{Path: "hop_count", Value: newHop},
-			{Path: "active_agent", Value: AgentOrchestrator},
 		})
-	}
-	if err := o.store.UpdateJob(ctx, jobID, sessionID, []firestore.Update{
-		{Path: "hop_count", Value: newHop},
-		{Path: "active_agent", Value: AgentOrchestrator},
-	}); err != nil {
-		return fmt.Errorf("update hop count: %w", err)
 	}
 
 	// Get session for chat context
