@@ -1,0 +1,16 @@
+# OS
+.DS_Store
+
+# PDF assignment
+*.pdf
+
+# Copilot instructions
+COPILOT_INSTRUCTIONS.md
+
+# Go
+orchestrator/orchestrator
+
+# Python
+__pycache__/
+*.pyc
+.venv/
