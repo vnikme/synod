@@ -62,7 +62,7 @@ func main() {
 		os.Getenv("GOOGLE_CSE_CX"),
 		os.Getenv("SEC_EDGAR_USER_AGENT"),
 	)
-	analystAgent, err := internal.NewAnalystAgent(gemini, store, sandboxURL)
+	analystAgent, err := internal.NewAnalystAgent(ctx, gemini, store, sandboxURL)
 	if err != nil {
 		slog.Error("analyst agent init failed", "error", err)
 		os.Exit(1)

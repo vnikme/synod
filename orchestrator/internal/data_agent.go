@@ -254,8 +254,14 @@ func detectCIK(query string) string {
 			return cik
 		}
 	}
+	// Tokenize query for word-boundary matching against company names
+	// to avoid false positives (e.g., "pineapple" matching "APPLE").
+	tokens := strings.FieldsFunc(upper, func(r rune) bool {
+		return (r < 'A' || r > 'Z') && (r < '0' || r > '9')
+	})
+	tokenStr := " " + strings.Join(tokens, " ") + " "
 	for name, cik := range nameCIK {
-		if strings.Contains(upper, name) {
+		if strings.Contains(tokenStr, " "+name+" ") {
 			return cik
 		}
 	}

@@ -125,6 +125,9 @@ func (o *OrchestratorAgent) Execute(ctx context.Context, jobID, sessionID string
 	// Dispatch to chosen agent
 	switch decision.NextAgent {
 	case "data":
+		if len(decision.Queries) == 0 {
+			return o.failJob(ctx, job, "routing decided 'data' but provided no queries")
+		}
 		if err := o.store.UpdateJob(ctx, jobID, sessionID, []firestore.Update{
 			{Path: "status", Value: StatusInProgress},
 			{Path: "active_agent", Value: AgentData},

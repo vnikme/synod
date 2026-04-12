@@ -40,10 +40,10 @@ type AnalystAgent struct {
 	http       *http.Client
 }
 
-func NewAnalystAgent(gemini *GeminiClient, store *Store, sandboxURL string) (*AnalystAgent, error) {
+func NewAnalystAgent(ctx context.Context, gemini *GeminiClient, store *Store, sandboxURL string) (*AnalystAgent, error) {
 	// Create an HTTP client that automatically adds ID tokens for Cloud Run auth.
 	// Falls back to a plain client if no credentials are available (local dev).
-	httpClient, err := idtoken.NewClient(context.Background(), sandboxURL)
+	httpClient, err := idtoken.NewClient(ctx, sandboxURL)
 	if err != nil {
 		slog.Warn("idtoken client unavailable, using plain HTTP (sandbox must allow unauthenticated)", "error", err)
 		httpClient = &http.Client{Timeout: 60 * time.Second}

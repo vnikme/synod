@@ -41,8 +41,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
-	w.WriteHeader(http.StatusOK)
-	w.Write([]byte(`{"status":"ok"}`))
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
 func (s *Server) handleIngest(w http.ResponseWriter, r *http.Request) {
@@ -62,6 +61,9 @@ func (s *Server) handleIngest(w http.ResponseWriter, r *http.Request) {
 	sessionID := req.SessionID
 	if sessionID == "" {
 		sessionID = uuid.NewString()
+	} else if _, err := uuid.Parse(sessionID); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "session_id must be a valid UUID"})
+		return
 	}
 	sess, err := s.store.GetSession(ctx, sessionID)
 	if err != nil {
