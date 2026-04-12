@@ -88,7 +88,7 @@ def _run_in_process(code: str, result_queue: multiprocessing.Queue):
     try:
         safe_builtins = {
             k: v for k, v in vars(builtins).items()
-            if k not in ("exec", "eval", "compile", "open", "breakpoint", "exit", "quit")
+            if k not in ("exec", "eval", "compile", "open", "breakpoint", "exit", "quit", "input")
         }
         safe_builtins["__import__"] = _restricted_import
 

@@ -3,11 +3,27 @@ package internal
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 
 	"cloud.google.com/go/firestore"
 )
+
+// permanentError represents an error that should not be retried by Cloud Tasks.
+// Returning HTTP 2xx prevents Cloud Tasks from retrying the delivery.
+type permanentError struct {
+	msg string
+}
+
+func (e *permanentError) Error() string { return e.msg }
+func (e *permanentError) Unwrap() error { return nil }
+
+// IsPermanentError checks whether an error is non-retryable.
+func IsPermanentError(err error) bool {
+	var pe *permanentError
+	return errors.As(err, &pe)
+}
 
 const maxHops = 5
 
@@ -85,7 +101,7 @@ func (o *OrchestratorAgent) Execute(ctx context.Context, jobID, sessionID string
 		return fmt.Errorf("get job: %w", err)
 	}
 	if job == nil {
-		return fmt.Errorf("job %s not found for session %s", jobID, sessionID)
+		return &permanentError{msg: fmt.Sprintf("job %s not found for session %s", jobID, sessionID)}
 	}
 
 	// Terminal states — no-op

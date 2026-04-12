@@ -9,6 +9,10 @@ import (
 	"github.com/google/uuid"
 )
 
+// handleRoute error classification:
+// - permanentError → return 200 to prevent Cloud Tasks retries
+// - other errors   → return 500 so Cloud Tasks retries transient failures
+
 type Server struct {
 	orchestrator *OrchestratorAgent
 	store        *Store
@@ -151,6 +155,12 @@ func (s *Server) handleRoute(w http.ResponseWriter, r *http.Request) {
 	slog.Info("route: received", "job_id", jobID)
 
 	if err := s.orchestrator.Execute(ctx, jobID, sessionID); err != nil {
+		if IsPermanentError(err) {
+			// Non-retryable: ACK the task so Cloud Tasks stops retrying.
+			slog.Warn("orchestrator permanent error (not retrying)", "job_id", jobID, "error", err)
+			w.WriteHeader(http.StatusOK)
+			return
+		}
 		slog.Error("orchestrator execution failed", "job_id", jobID, "error", err)
 		// Return 500 so Cloud Tasks retries on transient errors.
 		// Agent-level failures are handled internally (failJob marks FAILED and returns nil).
