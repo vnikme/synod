@@ -36,9 +36,10 @@ The architecture employs a **Polyglot Microservices Model** deployed on Google C
 
 To focus on the core orchestration and AI capabilities within the prototype time constraints, certain production features are explicitly deferred, while logical isolation is strictly maintained.
 
-### 3.1. Out of Scope: Authentication & Privacy
-*   **No IAM/JWT:** User authentication, identity verification (JWT), and strict privacy controls are **out of scope** for this prototype. 
-*   The API endpoints will not enforce authentication headers.
+### 3.1. Out of Scope: End-User Authentication & Privacy
+*   **No end-user IAM/JWT:** User authentication, identity verification (JWT), and strict privacy controls are **out of scope** for this prototype. 
+*   The public API endpoints (`/api/v1/*`) do not enforce authentication headers.
+*   **In scope: Service-to-service auth.** Internal endpoints (`/internal/*`) are protected by OIDC token verification at the application level (see §6.4).
 
 ### 3.2. In Scope: Logical Session Isolation
 Despite lacking strict authentication, the system must support multiple concurrent clients without data contamination (mixing contexts or facts between different users' requests).
@@ -106,7 +107,12 @@ The system eschews rigid Directed Acyclic Graphs (DAGs) in favor of a **Pull-Bas
 *   If `HopCount > 5`, execution is halted. The state transitions to `NEEDS_HUMAN_INPUT` (HITL - Human in the Loop), and the system pauses, awaiting manual user clarification.
 
 ### 6.4. Infrastructure Security
-*   All internal Cloud Run endpoints (workers and orchestrator callbacks) require GCP IAM OIDC tokens. Public invocation is blocked.
+*   Internal endpoints (`/internal/route`) are protected by application-level OIDC middleware that validates the `Authorization: Bearer` token on each request.
+*   The OIDC token audience must match `ORCHESTRATOR_BASE_URL` and the caller's email must match `SERVICE_ACCOUNT_EMAIL` (defense-in-depth).
+*   Cloud Tasks is configured to send OIDC tokens with the service account identity when dispatching tasks.
+*   The orchestrator Cloud Run service is deployed with `--allow-unauthenticated` to serve public API routes; internal route protection is enforced at the application layer.
+*   The sandbox Cloud Run service is deployed with `--no-allow-unauthenticated`; only the orchestrator's service account (via `idtoken.NewClient`) can invoke it.
+*   Local development can disable internal auth via `DISABLE_INTERNAL_AUTH=true`.
 
 ---
 

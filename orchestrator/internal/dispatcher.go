@@ -17,9 +17,13 @@ type Dispatcher struct {
 	location       string
 	queue          string
 	serviceAccount string
+	oidcAudience   string
 }
 
-func NewDispatcher(ctx context.Context) (*Dispatcher, error) {
+func NewDispatcher(ctx context.Context, oidcAudience string) (*Dispatcher, error) {
+	if oidcAudience == "" {
+		return nil, fmt.Errorf("oidcAudience must not be empty (set ORCHESTRATOR_BASE_URL)")
+	}
 	projectID := os.Getenv("GCP_PROJECT_ID")
 	if projectID == "" {
 		return nil, fmt.Errorf("missing required env var GCP_PROJECT_ID")
@@ -46,6 +50,7 @@ func NewDispatcher(ctx context.Context) (*Dispatcher, error) {
 		location:       location,
 		queue:          queue,
 		serviceAccount: serviceAccount,
+		oidcAudience:   oidcAudience,
 	}, nil
 }
 
@@ -71,6 +76,7 @@ func (d *Dispatcher) Enqueue(ctx context.Context, targetURL, jobID, sessionID st
 				AuthorizationHeader: &taskspb.HttpRequest_OidcToken{
 					OidcToken: &taskspb.OidcToken{
 						ServiceAccountEmail: d.serviceAccount,
+						Audience:            d.oidcAudience,
 					},
 				},
 			},
