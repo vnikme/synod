@@ -4,7 +4,7 @@ import time
 from fastapi import FastAPI
 from pydantic import BaseModel, Field
 
-from app.executor import execute_code
+from app.executor import execute_code, _mp_ctx
 
 logger = logging.getLogger("sandbox")
 
@@ -21,7 +21,7 @@ try:
 except Exception as e:
     logger.warning("matplotlib warm-up failed: %s", e)
 
-logger.info("sandbox ready (forkserver with preloaded matplotlib/pandas/numpy)")
+logger.info("sandbox ready (mp_context=%s)", _mp_ctx.get_start_method())
 
 app = FastAPI(title="Synod Sandbox")
 

@@ -24,9 +24,10 @@ from contextlib import redirect_stdout
 # is started once and pre-imports the heavy libraries. Each child is forked
 # from this clean server, inheriting the loaded modules instantly.
 #
-# Do not preload matplotlib.pyplot: _run_in_process must set the Agg backend
-# via MPLBACKEND (inherited from Dockerfile env) before pyplot is imported.
-# Preloading pyplot would lock in backend selection too early.
+# Do not preload matplotlib.pyplot: _run_in_process explicitly selects the
+# Agg backend with matplotlib.use("Agg") before importing pyplot. MPLBACKEND
+# is also set in the Dockerfile, but preloading pyplot would lock in backend
+# selection too early.
 if "forkserver" in multiprocessing.get_all_start_methods():
     _mp_ctx = multiprocessing.get_context("forkserver")
     _mp_ctx.set_forkserver_preload(["matplotlib", "pandas", "numpy"])
@@ -34,6 +35,37 @@ else:
     # Fallback for platforms without forkserver (Windows). Imports will be
     # slower but correct.
     _mp_ctx = multiprocessing.get_context("spawn")
+
+
+def _noop_warmup_target():
+    """No-op target used to eagerly start the forkserver process."""
+
+
+def _warm_forkserver():
+    """Pay one-time forkserver startup/preload cost at import time.
+
+    Without this, the first ``proc.start()`` triggers forkserver creation
+    and library preloading, adding unaccounted latency to ``spawn_s`` that
+    is outside the execution timeout.
+    """
+    if _mp_ctx.get_start_method() != "forkserver":
+        return
+    t0 = time.monotonic()
+    proc = _mp_ctx.Process(target=_noop_warmup_target)
+    try:
+        proc.start()
+        proc.join()
+        logging.getLogger("sandbox.executor").info(
+            "forkserver warmed in %.3fs", time.monotonic() - t0)
+    except Exception:
+        logging.getLogger("sandbox.executor").exception(
+            "failed to warm forkserver")
+        if proc.is_alive():
+            proc.terminate()
+            proc.join()
+
+
+_warm_forkserver()
 
 ALLOWED_MODULES = frozenset({
     "pandas", "numpy", "matplotlib", "matplotlib.pyplot",
@@ -176,7 +208,6 @@ def _run_in_process(code: str, result_queue: multiprocessing.Queue):
             error = traceback.format_exc()
             timings["exec_s"] = timings.get("exec_s", round(time.monotonic() - t0 - timings.get("imports_s", 0), 3))
 
-        t3 = time.monotonic()
         result_queue.put({
             "success": error is None,
             "stdout": stdout_buf.getvalue(),
@@ -184,7 +215,6 @@ def _run_in_process(code: str, result_queue: multiprocessing.Queue):
             "charts": charts,
             "timings": timings,
         })
-        timings["queue_put_s"] = round(time.monotonic() - t3, 3)
 
     except Exception:
         # Top-level catch: import failures or unexpected crashes. Always send
