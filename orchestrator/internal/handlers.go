@@ -424,7 +424,7 @@ func (s *Server) handleAgentExec(w http.ResponseWriter, r *http.Request, agent A
 			{Path: "status", Value: StatusFailed},
 			{Path: "final_result", Value: fmt.Sprintf("%s agent failed: %s", agent, errMsg)},
 		}); failErr != nil {
-			slog.Error("CRITICAL: failed to mark job as FAILED after agent error, job stuck IN_PROGRESS — manual intervention required",
+			slog.Error("CRITICAL: failed to mark job as FAILED after agent error, job stuck IN_PROGRESS — recovery sweep will handle",
 				"agent", agent, "job_id", jobID, "session_id", sessionID,
 				"store_error", failErr, "agent_error", agentErr)
 		}
@@ -462,14 +462,17 @@ func (s *Server) handleAgentExec(w http.ResponseWriter, r *http.Request, agent A
 
 // agentExecTimeout returns the maximum execution time for each agent type.
 // These are defense-in-depth against hung HTTP calls or LLM API stalls.
-// The sandbox itself has a 120s code execution timeout, and the analyst
-// retries up to 3 times, so it needs the longest budget.
+//
+// Sizing rationale for analyst: up to maxCodeRetries (3) attempts, each
+// consisting of an LLM code-gen call (~30s) plus a sandbox HTTP call (240s
+// client timeout, 120s code execution). Worst case ≈ 3×150s = 7.5min, so
+// 10min provides headroom without being excessive.
 func agentExecTimeout(agent AgentType) time.Duration {
 	switch agent {
 	case AgentData:
 		return 2 * time.Minute // Multiple concurrent HTTP calls + LLM extraction
 	case AgentAnalyst:
-		return 4 * time.Minute // Sandbox calls with up to 3 retries + LLM code gen
+		return 10 * time.Minute // Up to 3 sandbox retries (120s each) + LLM code gen
 	case AgentReport:
 		return 90 * time.Second // Single LLM call
 	default:

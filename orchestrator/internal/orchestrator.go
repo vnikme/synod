@@ -245,11 +245,19 @@ func (o *OrchestratorAgent) Execute(ctx context.Context, jobID, sessionID string
 
 	case "complete":
 		slog.Info("orchestrator: marking job complete", "job_id", jobID, "session_id", sessionID)
+		// Mark COMPLETED before appending to chat_history. This ordering
+		// ensures that if a duplicate /internal/route delivery arrives, the
+		// terminal-state guard at the top of Execute returns early and the
+		// report is not appended twice.
+		if err := o.store.UpdateJob(ctx, jobID, sessionID, []firestore.Update{
+			{Path: "status", Value: StatusCompleted},
+			{Path: "active_agent", Value: AgentOrchestrator},
+		}); err != nil {
+			return fmt.Errorf("mark complete: %w", err)
+		}
 		// Append the final report to chat history so future sessions in this
-		// thread have the full conversation context. This is done here (not in
-		// the report agent) so that only the accepted final report is appended,
-		// not intermediate drafts that the orchestrator may have sent back for
-		// revision.
+		// thread have the full conversation context. Best-effort: the report
+		// is already persisted in final_result.
 		if job.FinalResult != "" {
 			if err := o.store.AppendChatHistory(ctx, sessionID, ChatMessage{
 				Role: "assistant", Content: job.FinalResult,
@@ -258,10 +266,7 @@ func (o *OrchestratorAgent) Execute(ctx context.Context, jobID, sessionID string
 					"job_id", jobID, "session_id", sessionID, "error", err)
 			}
 		}
-		return o.store.UpdateJob(ctx, jobID, sessionID, []firestore.Update{
-			{Path: "status", Value: StatusCompleted},
-			{Path: "active_agent", Value: AgentOrchestrator},
-		})
+		return nil
 
 	default:
 		return o.failJob(ctx, job, "unknown agent: "+decision.NextAgent)
