@@ -251,6 +251,7 @@ func (s *Server) handleReply(w http.ResponseWriter, r *http.Request) {
 		if rollbackErr := s.store.UpdateJob(ctx, jobID, sessionID, []firestore.Update{
 			{Path: "status", Value: StatusHITL},
 			{Path: "active_agent", Value: AgentOrchestrator},
+			{Path: "agent_instructions", Value: job.AgentInstructions},
 			{Path: "final_result", Value: "Your reply was received, but resuming the job failed. Please retry."},
 		}); rollbackErr != nil {
 			slog.Error("reply: rollback to HITL failed", "error", rollbackErr, "job_id", jobID)

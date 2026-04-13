@@ -70,7 +70,9 @@ func (g *GeminiClient) GenerateJSON(ctx context.Context, system, prompt string, 
 			},
 		)
 		if err != nil {
-			return totalUsage, fmt.Errorf("GenerateContent (attempt %d): %w", attempt, err)
+			lastErr = fmt.Errorf("GenerateContent (attempt %d): %w", attempt, err)
+			slog.Warn("GenerateContent API error, retrying", "attempt", attempt, "error", err)
+			continue
 		}
 		totalUsage = totalUsage.Add(extractUsage(resp))
 		text := resp.Text()
@@ -85,17 +87,27 @@ func (g *GeminiClient) GenerateJSON(ctx context.Context, system, prompt string, 
 }
 
 // GenerateText calls Gemini and returns the raw text response and token usage.
+// Retries transient API errors up to 3 times.
 func (g *GeminiClient) GenerateText(ctx context.Context, system, prompt string) (string, TokenUsage, error) {
-	resp, err := g.client.Models.GenerateContent(ctx, g.model,
-		genai.Text(prompt),
-		&genai.GenerateContentConfig{
-			SystemInstruction: genai.NewContentFromText(system, "user"),
-		},
-	)
-	if err != nil {
-		return "", TokenUsage{}, fmt.Errorf("GenerateContent: %w", err)
+	const maxRetries = 3
+	var lastErr error
+	var totalUsage TokenUsage
+	for attempt := 1; attempt <= maxRetries; attempt++ {
+		resp, err := g.client.Models.GenerateContent(ctx, g.model,
+			genai.Text(prompt),
+			&genai.GenerateContentConfig{
+				SystemInstruction: genai.NewContentFromText(system, "user"),
+			},
+		)
+		if err != nil {
+			lastErr = fmt.Errorf("GenerateContent (attempt %d): %w", attempt, err)
+			slog.Warn("GenerateText API error, retrying", "attempt", attempt, "error", err)
+			continue
+		}
+		totalUsage = totalUsage.Add(extractUsage(resp))
+		return resp.Text(), totalUsage, nil
 	}
-	return resp.Text(), extractUsage(resp), nil
+	return "", totalUsage, lastErr
 }
 
 // SearchResult represents a single web search result from Gemini grounding.
@@ -106,31 +118,40 @@ type SearchResult struct {
 
 // SearchWeb performs a web search using Gemini's built-in Google Search grounding.
 // Returns structured search results and the LLM-summarized answer.
+// Retries transient API errors up to 3 times.
 func (g *GeminiClient) SearchWeb(ctx context.Context, query string) ([]SearchResult, string, TokenUsage, error) {
-	resp, err := g.client.Models.GenerateContent(ctx, g.model,
-		genai.Text(query),
-		&genai.GenerateContentConfig{
-			Tools: []*genai.Tool{
-				{GoogleSearch: &genai.GoogleSearch{}},
+	const maxRetries = 3
+	var lastErr error
+	var totalUsage TokenUsage
+	for attempt := 1; attempt <= maxRetries; attempt++ {
+		resp, err := g.client.Models.GenerateContent(ctx, g.model,
+			genai.Text(query),
+			&genai.GenerateContentConfig{
+				Tools: []*genai.Tool{
+					{GoogleSearch: &genai.GoogleSearch{}},
+				},
 			},
-		},
-	)
-	if err != nil {
-		return nil, "", TokenUsage{}, fmt.Errorf("SearchWeb: %w", err)
-	}
-	usage := extractUsage(resp)
-	text := resp.Text()
+		)
+		if err != nil {
+			lastErr = fmt.Errorf("SearchWeb (attempt %d): %w", attempt, err)
+			slog.Warn("SearchWeb API error, retrying", "attempt", attempt, "error", err)
+			continue
+		}
+		totalUsage = totalUsage.Add(extractUsage(resp))
+		text := resp.Text()
 
-	var results []SearchResult
-	if len(resp.Candidates) > 0 && resp.Candidates[0].GroundingMetadata != nil {
-		for _, chunk := range resp.Candidates[0].GroundingMetadata.GroundingChunks {
-			if chunk.Web != nil {
-				results = append(results, SearchResult{
-					Title: chunk.Web.Title,
-					URL:   chunk.Web.URI,
-				})
+		var results []SearchResult
+		if len(resp.Candidates) > 0 && resp.Candidates[0].GroundingMetadata != nil {
+			for _, chunk := range resp.Candidates[0].GroundingMetadata.GroundingChunks {
+				if chunk.Web != nil {
+					results = append(results, SearchResult{
+						Title: chunk.Web.Title,
+						URL:   chunk.Web.URI,
+					})
+				}
 			}
 		}
+		return results, text, totalUsage, nil
 	}
-	return results, text, usage, nil
+	return nil, "", totalUsage, lastErr
 }

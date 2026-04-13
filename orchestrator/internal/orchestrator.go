@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"time"
 
 	"cloud.google.com/go/firestore"
 )
@@ -75,7 +76,8 @@ Rules:
 - Be specific in "instructions" — tell the agent exactly what data to find or what to compute.
 - For financial requests, include company names/tickers in queries for SEC EDGAR lookup.
 - When the user has clarified their intent in chat_history, use the clarified intent for queries and instructions.
-- If collected_facts contains a "data_unavailable" entry, do NOT route to "data" again for the same topic. Instead, route to "report" to summarize what is known, or "ask_user" to explain the data limitation.`
+- If collected_facts contains a "data_unavailable" entry, do NOT route to "data" again for the same topic. Instead, route to "report" to summarize what is known, or "ask_user" to explain the data limitation.
+- Today's date is %s. Use this for any date-related reasoning.`
 
 type RoutingDecision struct {
 	NextAgent    string   `json:"next_agent"`
@@ -263,7 +265,8 @@ func (o *OrchestratorAgent) decide(ctx context.Context, job *Job, session *Sessi
 	prompt := fmt.Sprintf("Current job state:\n%s\n\nDecide which agent should act next.", string(stateJSON))
 
 	var decision RoutingDecision
-	usage, err := o.gemini.GenerateJSON(ctx, orchestratorSystemPrompt, prompt, &decision)
+	systemPrompt := fmt.Sprintf(orchestratorSystemPrompt, time.Now().Format("2006-01-02"))
+	usage, err := o.gemini.GenerateJSON(ctx, systemPrompt, prompt, &decision)
 	if err != nil {
 		return nil, usage, err
 	}
