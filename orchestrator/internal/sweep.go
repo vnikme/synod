@@ -82,9 +82,10 @@ func recoverJob(ctx context.Context, store JobStore, dispatcher TaskDispatcher, 
 		"job_id", job.JobID, "session_id", job.SessionID,
 		"agent", job.ActiveAgent, "updated_at", job.UpdatedAt)
 
-	// Enqueue orchestrator to re-evaluate. If this fails, the next sweep
-	// iteration will find the job still in QUEUED+orchestrator and can
-	// retry the enqueue (or the job can be picked up manually).
+	// Enqueue orchestrator to re-evaluate. If this fails, the job will be
+	// QUEUED+orchestrator with no Cloud Task. The sweep only targets
+	// IN_PROGRESS jobs, so this case requires manual re-enqueue (e.g.,
+	// POST /internal/route with the job_id and session_id).
 	if err := dispatcher.Enqueue(ctx, selfURL+"/internal/route", job.JobID, job.SessionID); err != nil {
 		slog.Error("recovery sweep: enqueue failed after recovery",
 			"job_id", job.JobID, "session_id", job.SessionID, "error", err)

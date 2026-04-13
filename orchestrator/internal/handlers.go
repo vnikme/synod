@@ -381,6 +381,17 @@ func (s *Server) handleAgentExec(w http.ResponseWriter, r *http.Request, agent A
 	// with CRITICAL-level logging for operator alerting.
 	// ---------------------------------------------------------------
 
+	// Panic safety net: if the agent (or any code below) panics, we must
+	// still return HTTP 200 rather than letting net/http recover and
+	// return 500. Without this, a panic leaves the job stuck IN_PROGRESS.
+	defer func() {
+		if r := recover(); r != nil {
+			slog.Error("CRITICAL: panic in agent execution after claim — job may be stuck IN_PROGRESS, recovery sweep will handle",
+				"agent", agent, "job_id", jobID, "session_id", sessionID, "panic", r)
+			w.WriteHeader(http.StatusOK)
+		}
+	}()
+
 	// Per-agent timeout — defense-in-depth against hung HTTP calls or
 	// LLM API stalls. Cloud Tasks has its own timeout, but this catches
 	// hangs earlier with a clear error message.
@@ -427,20 +438,22 @@ func (s *Server) handleAgentExec(w http.ResponseWriter, r *http.Request, agent A
 	// orchestrator manages status transitions. The job is IN_PROGRESS here,
 	// so transitioning to QUEUED+orchestrator is always correct.
 	//
-	// Transition first: if the subsequent Enqueue fails, a recovery sweep
-	// can discover the job by its QUEUED+orchestrator state.
+	// Transition first: if the subsequent Enqueue fails, the job will be
+	// QUEUED+orchestrator with no Cloud Task scheduled. The recovery sweep
+	// only targets IN_PROGRESS jobs, so this case requires manual re-enqueue
+	// (e.g., POST /internal/route with the job_id and session_id).
 	if err := s.store.UpdateJob(ctx, jobID, sessionID, []firestore.Update{
 		{Path: "status", Value: StatusQueued},
 		{Path: "active_agent", Value: AgentOrchestrator},
 	}); err != nil {
-		slog.Error("CRITICAL: callback transition failed after successful agent execution, job stuck IN_PROGRESS — manual intervention required",
+		slog.Error("CRITICAL: callback transition failed after successful agent execution, job stuck IN_PROGRESS — recovery sweep will handle",
 			"agent", agent, "job_id", jobID, "session_id", sessionID, "error", err)
 		w.WriteHeader(http.StatusOK)
 		return
 	}
 
 	if err := s.dispatcher.Enqueue(ctx, s.selfURL+"/internal/route", jobID, sessionID); err != nil {
-		slog.Error("CRITICAL: enqueue callback failed, job is QUEUED+orchestrator but no Cloud Task scheduled — manual re-enqueue or sweep required",
+		slog.Error("CRITICAL: enqueue callback failed, job is QUEUED+orchestrator but no Cloud Task scheduled — manual re-enqueue required",
 			"agent", agent, "job_id", jobID, "session_id", sessionID, "error", err)
 	}
 

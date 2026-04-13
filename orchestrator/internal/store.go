@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"cloud.google.com/go/firestore"
+	"google.golang.org/api/iterator"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 )
@@ -294,9 +295,11 @@ func (s *Store) FindStaleJobs(ctx context.Context, jobStatus JobStatus, olderTha
 	var jobs []*Job
 	for {
 		doc, err := iter.Next()
-		if err != nil {
-			// iterator.Done
+		if err == iterator.Done {
 			break
+		}
+		if err != nil {
+			return jobs, fmt.Errorf("FindStaleJobs: iterator error: %w", err)
 		}
 		var job Job
 		if err := doc.DataTo(&job); err != nil {

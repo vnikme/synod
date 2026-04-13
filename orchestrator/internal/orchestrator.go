@@ -164,7 +164,7 @@ func (o *OrchestratorAgent) Execute(ctx context.Context, jobID, sessionID string
 			Tokens: routeUsage,
 			Detail: detail,
 		}); auditErr != nil {
-			slog.Error("audit log failed", "job_id", jobID, "agent", "orchestrator", "error", auditErr)
+			slog.Error("audit log failed", "job_id", jobID, "session_id", sessionID, "agent", "orchestrator", "error", auditErr)
 		}
 		return o.failJob(ctx, job, detail)
 	}
@@ -179,7 +179,7 @@ func (o *OrchestratorAgent) Execute(ctx context.Context, jobID, sessionID string
 		Tokens: routeUsage,
 		Detail: fmt.Sprintf("next=%s: %s", decision.NextAgent, decision.Reasoning),
 	}); err != nil {
-		slog.Error("audit log failed", "job_id", jobID, "agent", "orchestrator", "error", err)
+		slog.Error("audit log failed", "job_id", jobID, "session_id", sessionID, "agent", "orchestrator", "error", err)
 	}
 	slog.Info("orchestrator: routing decision",
 		"job_id", jobID, "session_id", sessionID, "next_agent", decision.NextAgent, "reasoning", decision.Reasoning,
@@ -231,10 +231,10 @@ func (o *OrchestratorAgent) Execute(ctx context.Context, jobID, sessionID string
 		return nil
 
 	case "ask_user":
-		slog.Info("orchestrator: HITL — asking user for clarification", "job_id", jobID)
+		slog.Info("orchestrator: HITL — asking user for clarification", "job_id", jobID, "session_id", sessionID)
 		// Append the agent's question to chat history so the LLM sees the full conversation.
 		if err := o.store.AppendChatHistory(ctx, sessionID, ChatMessage{Role: "assistant", Content: decision.Instructions}); err != nil {
-			slog.Error("orchestrator: failed to append HITL question to chat history", "job_id", jobID, "error", err)
+			slog.Error("orchestrator: failed to append HITL question to chat history", "job_id", jobID, "session_id", sessionID, "error", err)
 		}
 		return o.store.UpdateJob(ctx, jobID, sessionID, []firestore.Update{
 			{Path: "status", Value: StatusHITL},
@@ -244,7 +244,7 @@ func (o *OrchestratorAgent) Execute(ctx context.Context, jobID, sessionID string
 		})
 
 	case "complete":
-		slog.Info("orchestrator: marking job complete", "job_id", jobID)
+		slog.Info("orchestrator: marking job complete", "job_id", jobID, "session_id", sessionID)
 		// Append the final report to chat history so future sessions in this
 		// thread have the full conversation context. This is done here (not in
 		// the report agent) so that only the accepted final report is appended,
@@ -286,7 +286,7 @@ func validateDecision(d *RoutingDecision, job *Job) *RoutingDecision {
 	case "data":
 		if len(d.Queries) == 0 {
 			slog.Warn("routing guardrail: LLM chose 'data' without queries — overriding to ask_user",
-				"job_id", job.JobID, "reasoning", d.Reasoning)
+				"job_id", job.JobID, "session_id", job.SessionID, "reasoning", d.Reasoning)
 			return &RoutingDecision{
 				NextAgent:    "ask_user",
 				Reasoning:    fmt.Sprintf("guardrail override: LLM chose 'data' without queries (original: %s)", d.Reasoning),
@@ -297,7 +297,7 @@ func validateDecision(d *RoutingDecision, job *Job) *RoutingDecision {
 	case "analyst":
 		if !hasFacts && !hasAssets {
 			slog.Warn("routing guardrail: LLM chose 'analyst' but no facts or assets exist — overriding to data",
-				"job_id", job.JobID, "reasoning", d.Reasoning)
+				"job_id", job.JobID, "session_id", job.SessionID, "reasoning", d.Reasoning)
 			return &RoutingDecision{
 				NextAgent:    "data",
 				Reasoning:    fmt.Sprintf("guardrail override: analyst needs data first (original: %s)", d.Reasoning),
@@ -309,7 +309,7 @@ func validateDecision(d *RoutingDecision, job *Job) *RoutingDecision {
 	case "report":
 		if !hasFacts && !hasAssets {
 			slog.Warn("routing guardrail: LLM chose 'report' but no facts or assets exist — overriding to ask_user",
-				"job_id", job.JobID, "reasoning", d.Reasoning)
+				"job_id", job.JobID, "session_id", job.SessionID, "reasoning", d.Reasoning)
 			return &RoutingDecision{
 				NextAgent:    "ask_user",
 				Reasoning:    fmt.Sprintf("guardrail override: report has no content to synthesize (original: %s)", d.Reasoning),
@@ -320,7 +320,7 @@ func validateDecision(d *RoutingDecision, job *Job) *RoutingDecision {
 	case "complete":
 		if !hasReport {
 			slog.Warn("routing guardrail: LLM chose 'complete' but final_result is empty — overriding to report",
-				"job_id", job.JobID, "reasoning", d.Reasoning)
+				"job_id", job.JobID, "session_id", job.SessionID, "reasoning", d.Reasoning)
 			return &RoutingDecision{
 				NextAgent:    "report",
 				Reasoning:    fmt.Sprintf("guardrail override: cannot complete without a report (original: %s)", d.Reasoning),
@@ -361,7 +361,7 @@ func (o *OrchestratorAgent) decide(ctx context.Context, job *Job, session *Sessi
 }
 
 func (o *OrchestratorAgent) failJob(ctx context.Context, job *Job, reason string) error {
-	slog.Error("failing job", "job_id", job.JobID, "reason", reason)
+	slog.Error("failing job", "job_id", job.JobID, "session_id", job.SessionID, "reason", reason)
 	return o.store.UpdateJob(ctx, job.JobID, job.SessionID, []firestore.Update{
 		{Path: "status", Value: StatusFailed},
 		{Path: "final_result", Value: reason},
@@ -377,7 +377,7 @@ func (o *OrchestratorAgent) revertDispatch(ctx context.Context, jobID, sessionID
 		{Path: "active_agent", Value: AgentOrchestrator},
 	}); revertErr != nil {
 		slog.Error("orchestrator: revert after enqueue failure also failed",
-			"job_id", jobID, "agent", agent,
+			"job_id", jobID, "session_id", sessionID, "agent", agent,
 			"enqueue_error", enqueueErr, "revert_error", revertErr)
 	}
 }
