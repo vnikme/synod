@@ -43,7 +43,7 @@
 
     <script>
         // --- State ---
-        let currentSessionId = localStorage.getItem('synod_session_id') || "";
+        let currentSessionId = sessionStorage.getItem('synod_session_id') || "";
         let activeJobId = null;   // non-null while HITL is awaiting reply
         let isPolling = false;
 
@@ -285,7 +285,7 @@
 
                 if (data.session_id) {
                     currentSessionId = data.session_id;
-                    localStorage.setItem('synod_session_id', currentSessionId);
+                    sessionStorage.setItem('synod_session_id', currentSessionId);
                     document.getElementById('session-id-display').innerText =
                         `Session: ${currentSessionId.substring(0, 8)}…`;
                 }
@@ -304,7 +304,7 @@
         document.getElementById('new-chat-btn').addEventListener('click', () => {
             currentSessionId = "";
             activeJobId = null;
-            localStorage.removeItem('synod_session_id');
+            sessionStorage.removeItem('synod_session_id');
             document.getElementById('session-id-display').innerText = "Session: New";
             chatContainer.innerHTML = `
                 <div class="flex items-start">

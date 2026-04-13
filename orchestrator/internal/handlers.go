@@ -234,6 +234,15 @@ func (s *Server) handleReply(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Update job.Prompt to include the user's clarification so the orchestrator's
+	// LLM sees the evolved intent as the primary field, not just in chat_history.
+	// This prevents the LLM from anchoring on the stale original prompt.
+	if err := s.store.UpdateJob(ctx, jobID, sessionID, []firestore.Update{
+		{Path: "prompt", Value: req.Message},
+	}); err != nil {
+		slog.Error("reply: update prompt failed (non-fatal)", "error", err, "job_id", jobID)
+	}
+
 	// Enqueue orchestrator. On failure, roll back to HITL so the client can retry safely.
 	if err := s.dispatcher.Enqueue(ctx, s.selfURL+"/internal/route", jobID, sessionID); err != nil {
 		slog.Error("reply: enqueue route failed", "error", err)
