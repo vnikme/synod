@@ -47,7 +47,7 @@ Available agents:
 You will receive the full job state as JSON. Examine:
 - prompt: the user's INITIAL request (may be outdated if the user later clarified)
 - collected_facts: structured data gathered so far (empty = no research yet)
-- generated_assets: charts/analysis produced so far (empty = no analysis yet)
+- generated_assets: charts/analysis produced so far (empty = no analysis yet). Each asset has type, name, and for text assets a content_preview showing what was produced.
 - missing_queries: unfulfilled data requests from previous agent runs
 - final_result: final output text (empty = not done yet)
 - chat_history: the FULL conversation including user clarifications
@@ -70,7 +70,7 @@ Rules:
 - If no facts have been collected yet AND no analysis has been produced, route to "data" with specific search queries — UNLESS the task is purely computational (e.g., math, code execution) and needs no external data.
 - If facts exist but no analysis/charts have been produced, route to "analyst".
 - If the task needs no external data (pure computation, code execution), route directly to "analyst".
-- If generated_assets is non-empty (analysis was already produced), route to "report" to finalize the result. Do NOT route to "analyst" again if it already succeeded.
+- If generated_assets is non-empty, the analyst has ALREADY SUCCEEDED. You MUST route to "report" — NEVER back to "analyst". Check the content_preview field to confirm analysis output exists, then proceed to report generation.
 - If final_result is already populated, return "complete".
 - If the request is ambiguous or you need clarification, route to "ask_user" and put your question in "instructions".
 - "queries" is required when next_agent is "data"; omit otherwise.
@@ -176,15 +176,6 @@ func (o *OrchestratorAgent) Execute(ctx context.Context, jobID, sessionID string
 	slog.Info("orchestrator: routing decision",
 		"job_id", jobID, "next_agent", decision.NextAgent, "reasoning", decision.Reasoning,
 	)
-
-	// Guard: if the analyst already produced output, force routing to report.
-	// Prevents infinite analyst→orchestrator→analyst loops regardless of LLM decision.
-	if decision.NextAgent == "analyst" && len(job.GeneratedAssets) > 0 {
-		slog.Warn("orchestrator: overriding analyst→report (assets already exist)",
-			"job_id", jobID, "num_assets", len(job.GeneratedAssets))
-		decision.NextAgent = "report"
-		decision.Instructions = "Synthesize the collected facts and analysis output into a final report for the user."
-	}
 
 	// Dispatch to chosen agent via Cloud Tasks (async)
 	switch decision.NextAgent {
@@ -308,7 +299,17 @@ func (o *OrchestratorAgent) revertDispatch(ctx context.Context, jobID, sessionID
 func assetSummaries(assets []Asset) []map[string]string {
 	out := make([]map[string]string, len(assets))
 	for i, a := range assets {
-		out[i] = map[string]string{"type": a.Type, "name": a.Name}
+		m := map[string]string{"type": a.Type, "name": a.Name}
+		// Include a content preview for text-based assets so the LLM can see
+		// what was produced. Skip binary content (charts are base64-encoded).
+		if a.Type != "chart" && a.Content != "" {
+			preview := a.Content
+			if len(preview) > 500 {
+				preview = preview[:500] + "…"
+			}
+			m["content_preview"] = preview
+		}
+		out[i] = m
 	}
 	return out
 }
