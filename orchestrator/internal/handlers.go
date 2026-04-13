@@ -85,7 +85,9 @@ func (s *Server) registerRoutes() {
 				return
 			}
 			w.Header().Set("Content-Type", "text/html; charset=utf-8")
-			w.Write(data)
+			if _, err := w.Write(data); err != nil {
+				slog.Error("failed to write SPA fallback response", "path", r.URL.Path, "error", err)
+			}
 		})
 	}
 }
@@ -202,6 +204,30 @@ func (s *Server) handleReply(w http.ResponseWriter, r *http.Request) {
 	}
 	sessionID := strings.TrimSpace(req.SessionID)
 
+	// Verify job exists and is in HITL state before mutating session.
+	job, err := s.store.GetJob(ctx, jobID, sessionID)
+	if err != nil {
+		slog.Error("reply: get job failed", "error", err)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal error"})
+		return
+	}
+	if job == nil {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "job not found"})
+		return
+	}
+	if job.Status != StatusHITL {
+		writeJSON(w, http.StatusConflict, map[string]string{"error": "job is not awaiting user input"})
+		return
+	}
+
+	// Append user reply to chat history BEFORE resuming the job, so the
+	// orchestrator always sees the clarification when it picks up the task.
+	if err := s.store.AppendChatHistory(ctx, sessionID, ChatMessage{Role: "user", Content: req.Message}); err != nil {
+		slog.Error("reply: append chat history failed", "error", err)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal error"})
+		return
+	}
+
 	// Atomic resume: CAS HITL → QUEUED+orchestrator, reset hop_count, clear final_result.
 	// Only one concurrent reply succeeds; others get the appropriate error.
 	_, result, err := s.store.ResumeHITLJob(ctx, jobID, sessionID)
@@ -217,30 +243,6 @@ func (s *Server) handleReply(w http.ResponseWriter, r *http.Request) {
 	case ResumeNotHITL:
 		writeJSON(w, http.StatusConflict, map[string]string{"error": "job is not awaiting user input"})
 		return
-	}
-
-	// Append user reply to chat history after successful resume — avoids mutating
-	// session state on invalid/non-HITL requests. If this fails, roll back.
-	if err := s.store.AppendChatHistory(ctx, sessionID, ChatMessage{Role: "user", Content: req.Message}); err != nil {
-		slog.Error("reply: append chat history failed", "error", err)
-		if rollbackErr := s.store.UpdateJob(ctx, jobID, sessionID, []firestore.Update{
-			{Path: "status", Value: StatusHITL},
-			{Path: "active_agent", Value: AgentOrchestrator},
-			{Path: "final_result", Value: "Your reply could not be saved. Please retry."},
-		}); rollbackErr != nil {
-			slog.Error("reply: rollback to HITL failed", "error", rollbackErr, "job_id", jobID)
-		}
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal error"})
-		return
-	}
-
-	// Update job.Prompt to include the user's clarification so the orchestrator's
-	// LLM sees the evolved intent as the primary field, not just in chat_history.
-	// This prevents the LLM from anchoring on the stale original prompt.
-	if err := s.store.UpdateJob(ctx, jobID, sessionID, []firestore.Update{
-		{Path: "prompt", Value: req.Message},
-	}); err != nil {
-		slog.Error("reply: update prompt failed (non-fatal)", "error", err, "job_id", jobID)
 	}
 
 	// Enqueue orchestrator. On failure, roll back to HITL so the client can retry safely.

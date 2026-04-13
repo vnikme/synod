@@ -45,7 +45,7 @@ The orchestrator embeds a single-page web UI (Tailwind CSS + marked.js) served a
 *   HITL reply — the UI detects when the system needs clarification and switches to reply mode
 *   Markdown report rendering with DOMPurify sanitization
 *   Inline chart display (base64 PNG assets)
-*   Session persistence via localStorage
+*   Session persistence via sessionStorage (per-tab, cleared on browser close)
 
 ## 5. API Usage
 

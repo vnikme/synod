@@ -81,6 +81,12 @@ def _run_in_process(code: str, result_queue: multiprocessing.Queue):
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
+    # Pre-import heavy allowed libraries before installing the restricted
+    # import hook. This populates sys.modules so subsequent imports by
+    # user code (and internal imports by these libs) hit the cache and
+    # never trigger the restricted hook for os/sys/etc.
+    import pandas  # noqa: F401
+    import numpy  # noqa: F401
 
     stdout_buf = io.StringIO()
     charts: list[str] = []

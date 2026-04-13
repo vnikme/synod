@@ -119,17 +119,18 @@
             isPolling = true;
             let pollErrors = 0;
 
-            const pollInterval = setInterval(async () => {
+            async function poll() {
                 try {
                     const res = await fetch(`/api/v1/tasks/${encodeURIComponent(jobId)}?session_id=${encodeURIComponent(currentSessionId)}`);
                     if (!res.ok) {
                         pollErrors++;
                         if (pollErrors >= 5) {
-                            clearInterval(pollInterval);
                             isPolling = false;
                             appendErrorMessage(`Lost connection to server (${res.status}). Please try again.`);
                             setInputEnabled(true);
+                            return;
                         }
+                        setTimeout(poll, 2000);
                         return;
                     }
                     pollErrors = 0;
