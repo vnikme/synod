@@ -256,7 +256,7 @@ func (m *mockStore) FindStaleJobs(_ context.Context, status JobStatus, olderThan
 	return result, nil
 }
 
-func (m *mockStore) RecoverStaleJob(_ context.Context, jobID, sessionID string) (bool, error) {
+func (m *mockStore) RecoverStaleJob(_ context.Context, jobID, sessionID string, olderThan time.Time) (bool, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.recoverStaleErr != nil {
@@ -268,6 +268,9 @@ func (m *mockStore) RecoverStaleJob(_ context.Context, jobID, sessionID string) 
 	}
 	if job.Status != StatusInProgress {
 		return false, nil // already moved out of IN_PROGRESS
+	}
+	if !job.UpdatedAt.Before(olderThan) {
+		return false, nil // job was updated since query — still active
 	}
 	job.Status = StatusQueued
 	job.ActiveAgent = AgentOrchestrator

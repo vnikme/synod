@@ -288,6 +288,7 @@ func (s *Store) FindStaleJobs(ctx context.Context, jobStatus JobStatus, olderTha
 	iter := s.client.Collection("jobs").
 		Where("status", "==", string(jobStatus)).
 		Where("updated_at", "<", olderThan).
+		OrderBy("updated_at", firestore.Asc).
 		Limit(50). // Cap per-sweep to avoid Firestore read spikes
 		Documents(ctx)
 	defer iter.Stop()
@@ -312,9 +313,11 @@ func (s *Store) FindStaleJobs(ctx context.Context, jobStatus JobStatus, olderTha
 }
 
 // RecoverStaleJob atomically transitions a job from IN_PROGRESS to
-// QUEUED+orchestrator via CAS. Returns true if the transition succeeded,
-// false if the job was no longer IN_PROGRESS (already recovered or completed).
-func (s *Store) RecoverStaleJob(ctx context.Context, jobID, sessionID string) (bool, error) {
+// QUEUED+orchestrator via CAS. The olderThan cutoff is re-validated inside
+// the transaction to ensure the job hasn't been updated since the sweep
+// query (prevents recovering actively-progressing jobs). Returns true if
+// the transition succeeded, false if the preconditions no longer hold.
+func (s *Store) RecoverStaleJob(ctx context.Context, jobID, sessionID string, olderThan time.Time) (bool, error) {
 	ref := s.client.Collection("jobs").Doc(jobID)
 	var recovered bool
 	err := s.client.RunTransaction(ctx, func(ctx context.Context, tx *firestore.Transaction) error {
@@ -335,6 +338,9 @@ func (s *Store) RecoverStaleJob(ctx context.Context, jobID, sessionID string) (b
 		}
 		if job.Status != StatusInProgress {
 			return nil // already moved — nothing to do
+		}
+		if !job.UpdatedAt.Before(olderThan) {
+			return nil // job was updated since the sweep query — still active
 		}
 		if err := tx.Update(ref, []firestore.Update{
 			{Path: "status", Value: StatusQueued},

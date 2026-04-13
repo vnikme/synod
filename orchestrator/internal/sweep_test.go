@@ -11,16 +11,16 @@ func TestRunSweep_FindsAndRecoversStaleJobs(t *testing.T) {
 	store := newMockStore()
 	disp := &mockDispatcher{}
 
-	// Create a stale IN_PROGRESS job (updated_at > 10 min ago)
+	// Create a stale IN_PROGRESS job (updated_at > 15 min ago)
 	seedJob(store, &Job{
 		JobID:       "stale-1",
 		SessionID:   "sess-1",
 		Status:      StatusInProgress,
 		ActiveAgent: AgentData,
 	})
-	// Manually backdate updated_at
+	// Manually backdate updated_at well beyond staleJobThreshold (15 min)
 	store.mu.Lock()
-	store.jobs["stale-1"].UpdatedAt = time.Now().Add(-15 * time.Minute)
+	store.jobs["stale-1"].UpdatedAt = time.Now().Add(-20 * time.Minute)
 	store.mu.Unlock()
 
 	runSweep(context.Background(), store, disp, "http://localhost:8080")

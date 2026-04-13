@@ -12,9 +12,9 @@ const (
 
 	// staleJobThreshold defines how long a job can be IN_PROGRESS before
 	// the sweep considers it stuck. This must be longer than the longest
-	// expected agent execution (analyst w/ retries ≈ 3–4 min) to avoid
+	// expected agent execution (analyst timeout = 10 min) to avoid
 	// recovering jobs that are still executing normally.
-	staleJobThreshold = 10 * time.Minute
+	staleJobThreshold = 15 * time.Minute
 )
 
 // StartRecoverySweep launches a background goroutine that periodically scans
@@ -67,7 +67,8 @@ func runSweep(ctx context.Context, store JobStore, dispatcher TaskDispatcher, se
 func recoverJob(ctx context.Context, store JobStore, dispatcher TaskDispatcher, selfURL string, job *Job) {
 	// CAS: only recover if STILL in IN_PROGRESS. Another sweep or normal
 	// execution may have already resolved it.
-	recovered, err := store.RecoverStaleJob(ctx, job.JobID, job.SessionID)
+	cutoff := time.Now().Add(-staleJobThreshold)
+	recovered, err := store.RecoverStaleJob(ctx, job.JobID, job.SessionID, cutoff)
 	if err != nil {
 		slog.Error("recovery sweep: RecoverStaleJob failed",
 			"job_id", job.JobID, "session_id", job.SessionID, "error", err)
