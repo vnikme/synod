@@ -76,19 +76,15 @@ def _restricted_import(name, globals=None, locals=None, fromlist=(), level=0):
     restricted to the same allowlist enforced by ``CodeValidator``.
 
     Allowed third-party libraries are pre-imported before this hook is exposed
-    to user code, so subsequent imports of allowed modules can resolve from
-    ``sys.modules`` cache. Cached modules must still satisfy the same blocked
-    and allowed-root checks as uncached imports.
+    to user code, but the actual import result is still delegated to Python's
+    ``__import__`` so standard import semantics are preserved for cached and
+    uncached modules alike.
     """
-    import sys as _sys
     root = name.split(".")[0]
     if root in BLOCKED_MODULES:
         raise ImportError(f"Import of '{name}' is blocked for security")
     if root not in ALLOWED_ROOTS:
         raise ImportError(f"Import of '{name}' is not allowed")
-    # Return cached modules when their root is explicitly allowed.
-    if name in _sys.modules:
-        return _sys.modules[name]
     return builtins.__import__(name, globals, locals, fromlist, level)
 
 

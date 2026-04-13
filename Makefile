@@ -1,7 +1,7 @@
 # Makefile — thin wrapper around deploy scripts.
 # Canonical deployment: deploy/gcp/*.sh
 
-.PHONY: setup deploy-sandbox deploy-orchestrator deploy-all build
+.PHONY: setup deploy-sandbox deploy-orchestrator deploy-all build test
 
 setup:
 	bash deploy/gcp/00_setup.gcp.sh
@@ -17,3 +17,6 @@ deploy-orchestrator:
 
 deploy-all:
 	bash deploy/gcp/02_deploy.sh
+
+test:
+	cd orchestrator && go vet ./... && go test ./...
