@@ -73,7 +73,7 @@ curl -X POST "https://synod.ai.church/api/v1/tasks/{job_id}/reply" \
   -H "Content-Type: application/json" \
   -d '{"session_id": "uuid", "message": "Focus on Q3 2024 specifically."}'
 
-# Response: HTTP 200 OK — resumes orchestration.
+# Response: HTTP 202 Accepted — resumes orchestration asynchronously.
 ```
 
 ## 6. Local Setup & Deployment

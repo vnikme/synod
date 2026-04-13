@@ -175,16 +175,21 @@
                             `<p>${escapeHtml(job.agent_instructions || "Please clarify your request.")}</p>`;
                     }
 
-                    // Chart assets
+                    // Assets: charts and analysis output
                     if (job.generated_assets && job.generated_assets.length > 0) {
                         assetsEl.innerHTML = '';
                         job.generated_assets.forEach(a => {
-                            if (a.type === "image/png") {
+                            if (a.type === "chart") {
                                 const img = document.createElement('img');
                                 img.src = `data:image/png;base64,${a.content}`;
                                 img.className = 'rounded-lg border shadow-sm max-h-96';
                                 img.alt = a.name || 'chart';
                                 assetsEl.appendChild(img);
+                            } else if (a.type === "analysis_output") {
+                                const pre = document.createElement('pre');
+                                pre.className = 'bg-gray-50 border rounded-lg p-4 text-sm overflow-x-auto whitespace-pre-wrap';
+                                pre.textContent = a.content;
+                                assetsEl.appendChild(pre);
                             }
                         });
                     }
@@ -207,6 +212,15 @@
                     }
                 } catch (e) {
                     console.error("Polling error", e);
+                    pollErrors++;
+                    if (pollErrors >= 5) {
+                        clearInterval(pollInterval);
+                        isPolling = false;
+                        activeJobId = null;
+                        input.placeholder = "e.g. Compare Q3 revenue for Apple and Microsoft and draw a chart...";
+                        appendErrorMessage("Lost connection to server. Please try again.");
+                        setInputEnabled(true);
+                    }
                 }
             }, 2000);
         }
@@ -223,8 +237,6 @@
             // HITL reply mode
             if (activeJobId) {
                 const jobId = activeJobId;
-                activeJobId = null;
-                input.placeholder = "e.g. Compare Q3 revenue for Apple and Microsoft and draw a chart...";
 
                 try {
                     const res = await fetch(`/api/v1/tasks/${encodeURIComponent(jobId)}/reply`, {
@@ -238,6 +250,9 @@
                         setInputEnabled(true);
                         return;
                     }
+
+                    activeJobId = null;
+                    input.placeholder = "e.g. Compare Q3 revenue for Apple and Microsoft and draw a chart...";
 
                     // Resume polling — reuse the same jobId for element lookups
                     const resumeId = jobId + '-r' + Date.now();
