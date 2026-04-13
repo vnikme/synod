@@ -1,0 +1,7 @@
+.env
+*.env
+*.pdf
+.git
+.DS_Store
+__pycache__
+*.pyc
