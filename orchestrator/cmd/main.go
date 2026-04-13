@@ -59,8 +59,6 @@ func main() {
 
 	// Initialize agents
 	dataAgent := internal.NewDataAgent(gemini, store,
-		os.Getenv("GOOGLE_CSE_API_KEY"),
-		os.Getenv("GOOGLE_CSE_CX"),
 		os.Getenv("SEC_EDGAR_USER_AGENT"),
 	)
 	analystAgent, err := internal.NewAnalystAgent(ctx, gemini, store, sandboxURL)

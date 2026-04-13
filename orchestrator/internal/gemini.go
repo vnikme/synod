@@ -97,3 +97,41 @@ func (g *GeminiClient) GenerateText(ctx context.Context, system, prompt string) 
 	}
 	return resp.Text(), extractUsage(resp), nil
 }
+
+// SearchResult represents a single web search result from Gemini grounding.
+type SearchResult struct {
+	Title   string
+	Snippet string
+	URL     string
+}
+
+// SearchWeb performs a web search using Gemini's built-in Google Search grounding.
+// Returns structured search results and the LLM-summarized answer.
+func (g *GeminiClient) SearchWeb(ctx context.Context, query string) ([]SearchResult, string, TokenUsage, error) {
+	resp, err := g.client.Models.GenerateContent(ctx, g.model,
+		genai.Text(query),
+		&genai.GenerateContentConfig{
+			Tools: []*genai.Tool{
+				{GoogleSearch: &genai.GoogleSearch{}},
+			},
+		},
+	)
+	if err != nil {
+		return nil, "", TokenUsage{}, fmt.Errorf("SearchWeb: %w", err)
+	}
+	usage := extractUsage(resp)
+	text := resp.Text()
+
+	var results []SearchResult
+	if len(resp.Candidates) > 0 && resp.Candidates[0].GroundingMetadata != nil {
+		for _, chunk := range resp.Candidates[0].GroundingMetadata.GroundingChunks {
+			if chunk.Web != nil {
+				results = append(results, SearchResult{
+					Title: chunk.Web.Title,
+					URL:   chunk.Web.URI,
+				})
+			}
+		}
+	}
+	return results, text, usage, nil
+}
