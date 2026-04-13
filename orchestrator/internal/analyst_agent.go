@@ -87,23 +87,35 @@ func (a *AnalystAgent) Execute(ctx context.Context, job *Job, instructions strin
 			p += fmt.Sprintf("\n\nYour previous code failed with error:\n%s\n\nFix the issues and regenerate.", lastError)
 		}
 
+		llmStart := time.Now()
 		code, usage, err := a.gemini.GenerateText(ctx, fmt.Sprintf(codeGenSystemPrompt, time.Now().Format("2006-01-02")), p)
 		if err != nil {
 			return totalUsage, fmt.Errorf("code generation: %w", err)
 		}
 		totalUsage = totalUsage.Add(usage)
 		code = stripCodeFences(code)
+		llmElapsed := time.Since(llmStart)
 
-		slog.Info("analyst agent: executing code", "job_id", job.JobID, "attempt", attempt, "code_len", len(code))
+		slog.Info("analyst agent: executing code",
+			"job_id", job.JobID, "attempt", attempt,
+			"code_len", len(code), "llm_ms", llmElapsed.Milliseconds())
 
+		sandboxStart := time.Now()
 		result, err := a.callSandbox(ctx, code)
+		sandboxElapsed := time.Since(sandboxStart)
 		if err != nil {
 			slog.Warn("analyst agent: sandbox call failed (transient)",
-				"job_id", job.JobID, "attempt", attempt, "error", err)
+				"job_id", job.JobID, "attempt", attempt,
+				"error", err, "sandbox_ms", sandboxElapsed.Milliseconds())
 			lastError = fmt.Sprintf("sandbox HTTP error: %s", err.Error())
 			continue
 		}
 
+		slog.Info("analyst agent: sandbox returned",
+			"job_id", job.JobID, "attempt", attempt,
+			"success", result.Success, "charts", len(result.Charts),
+			"sandbox_ms", sandboxElapsed.Milliseconds(),
+			"sandbox_timings", result.Timings)
 		if result.Success {
 			slog.Info("analyst agent: success", "job_id", job.JobID, "charts", len(result.Charts))
 			assets := append([]Asset{}, job.GeneratedAssets...)
