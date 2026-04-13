@@ -1,6 +1,8 @@
 """Tests for the sandboxed Python code executor."""
 
-from app.executor import execute_code, validate_code
+import pytest
+
+from app.executor import CodeValidator, execute_code, validate_code
 
 
 # --- AST Validation ---

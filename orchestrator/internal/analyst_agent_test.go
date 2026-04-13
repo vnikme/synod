@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
-	"strings"
 	"testing"
 	"time"
 )
@@ -189,7 +188,7 @@ func TestAnalystAgent_AllRetriesFail(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error after all retries fail")
 	}
-	if !strings.Contains(err.Error(), "code execution failed") {
+	if !contains(err.Error(), "code execution failed") {
 		t.Errorf("error = %q, want to contain 'code execution failed'", err.Error())
 	}
 }
@@ -224,4 +223,15 @@ func TestAnalystAgent_SandboxHTTPError(t *testing.T) {
 	}
 }
 
+func contains(s, substr string) bool {
+	return len(s) >= len(substr) && (s == substr || len(s) > 0 && containsHelper(s, substr))
+}
 
+func containsHelper(s, substr string) bool {
+	for i := 0; i <= len(s)-len(substr); i++ {
+		if s[i:i+len(substr)] == substr {
+			return true
+		}
+	}
+	return false
+}
