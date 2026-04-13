@@ -223,9 +223,14 @@ func (o *OrchestratorAgent) Execute(ctx context.Context, jobID, sessionID string
 
 	case "ask_user":
 		slog.Info("orchestrator: HITL — asking user for clarification", "job_id", jobID)
+		// Append the agent's question to chat history so the LLM sees the full conversation.
+		if err := o.store.AppendChatHistory(ctx, sessionID, ChatMessage{Role: "assistant", Content: decision.Instructions}); err != nil {
+			slog.Error("orchestrator: failed to append HITL question to chat history", "job_id", jobID, "error", err)
+		}
 		return o.store.UpdateJob(ctx, jobID, sessionID, []firestore.Update{
 			{Path: "status", Value: StatusHITL},
 			{Path: "active_agent", Value: AgentOrchestrator},
+			{Path: "agent_instructions", Value: decision.Instructions},
 			{Path: "final_result", Value: decision.Instructions},
 		})
 
