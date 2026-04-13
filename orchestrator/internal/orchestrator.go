@@ -38,8 +38,8 @@ Available agents:
    Use when: sufficient facts have been collected and analysis or visualization is needed.
 3. "report" — Synthesizes collected facts and analysis into a structured final report.
    Use when: both data collection and analysis are complete.
-4. "complete" — The task is already finished.
-   Use when: final_result is already set.
+4. "complete" — Finalize the task.
+   Use when: final_result contains a report that adequately addresses the user's request.
 5. "ask_user" — Ask the user a clarifying question.
    Use when: the user's request is ambiguous, lacks specific metrics, or you cannot determine how to proceed.
    Put your question in the "instructions" field.

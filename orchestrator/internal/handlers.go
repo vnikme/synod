@@ -69,6 +69,11 @@ func (s *Server) registerRoutes() {
 	// Serve embedded UI — SPA fallback: serve index.html for unmatched GET requests.
 	if s.staticFS != nil {
 		s.mux.HandleFunc("GET /", func(w http.ResponseWriter, r *http.Request) {
+			// Don't serve SPA for API/internal paths — return 404 instead.
+			if strings.HasPrefix(r.URL.Path, "/api/") || strings.HasPrefix(r.URL.Path, "/internal/") {
+				http.NotFound(w, r)
+				return
+			}
 			// Try to serve the exact file first; fall back to index.html for SPA routes.
 			if r.URL.Path != "/" {
 				f, err := s.staticFS.Open(strings.TrimPrefix(r.URL.Path, "/"))

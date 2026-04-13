@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
+	"unicode/utf8"
 
 	"cloud.google.com/go/firestore"
 )
@@ -73,7 +74,7 @@ func (a *ReportAgent) Execute(ctx context.Context, job *Job, session *Session, i
 	slog.Info("report agent: done", "job_id", job.JobID, "report_len", len(report))
 
 	// Build summary for orchestrator
-	summary := fmt.Sprintf("Report agent completed. Generated a %d-character report.", len(report))
+	summary := fmt.Sprintf("Report agent completed. Generated a %d-character report.", utf8.RuneCountInString(report))
 	if report != "" {
 		summary += "\nReport preview:\n" + truncateRunes(report, 300)
 	}
