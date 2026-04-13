@@ -143,7 +143,8 @@ func (o *OrchestratorAgent) Execute(ctx context.Context, jobID, sessionID string
 		return o.store.UpdateJob(ctx, jobID, sessionID, []firestore.Update{
 			{Path: "status", Value: StatusHITL},
 			{Path: "active_agent", Value: AgentOrchestrator},
-			{Path: "final_result", Value: "Maximum processing steps reached. Please refine your request or provide additional context."},
+			{Path: "agent_instructions", Value: "Maximum processing steps reached. Please refine your request or provide additional context."},
+			{Path: "final_result", Value: ""},
 		})
 	}
 
@@ -309,11 +310,7 @@ func assetSummaries(assets []Asset) []map[string]string {
 		// Include a content preview for text-based assets so the LLM can see
 		// what was produced. Skip binary content (charts are base64-encoded).
 		if a.Type != "chart" && a.Content != "" {
-			preview := a.Content
-			if len(preview) > 500 {
-				preview = preview[:500] + "…"
-			}
-			m["content_preview"] = preview
+			m["content_preview"] = truncateRunes(a.Content, 500)
 		}
 		out[i] = m
 	}

@@ -2,6 +2,15 @@ package internal
 
 import "time"
 
+// truncateRunes truncates s to at most maxRunes runes, appending "…" if truncated.
+func truncateRunes(s string, maxRunes int) string {
+	runes := []rune(s)
+	if len(runes) <= maxRunes {
+		return s
+	}
+	return string(runes[:maxRunes]) + "…"
+}
+
 // --- Enumerations ---
 
 type JobStatus string

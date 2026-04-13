@@ -120,11 +120,7 @@ func (a *AnalystAgent) Execute(ctx context.Context, job *Job, instructions strin
 			var summaryParts []string
 			summaryParts = append(summaryParts, fmt.Sprintf("Analyst agent completed successfully. Charts produced: %d.", len(result.Charts)))
 			if result.Stdout != "" {
-				preview := result.Stdout
-				if len(preview) > 500 {
-					preview = preview[:500] + "…"
-				}
-				summaryParts = append(summaryParts, "Analysis output:\n"+preview)
+				summaryParts = append(summaryParts, "Analysis output:\n"+truncateRunes(result.Stdout, 500))
 			}
 			summary := strings.Join(summaryParts, "\n")
 

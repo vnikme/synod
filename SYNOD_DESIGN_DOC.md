@@ -100,7 +100,7 @@ The system eschews rigid Directed Acyclic Graphs (DAGs) in favor of a **Pull-Bas
 ### 6.2. Sandboxed Code Execution
 *   The `Analyst Agent` generates LLM-produced Python code which is executed in a separate Sandbox service.
 *   **Pre-flight Check:** The Sandbox parses code into an Abstract Syntax Tree (AST). An import allowlist restricts direct user imports to safe modules (pandas, numpy, matplotlib, math, etc.). A custom `__import__` hook enforces a runtime blocklist (os, sys, subprocess, etc.), allowing transitive imports from permitted libraries.
-*   **Execution:** Code runs in a child process as a non-root user with restricted builtins (no exec, eval, compile, open) and a 60-second OS-level timeout. Exceptions are caught and fed back to the LLM for self-debugging.
+*   **Execution:** Code runs in a child process as a non-root user with restricted builtins (no exec, eval, compile, open) and a 120-second timeout. Exceptions are caught and fed back to the LLM for self-debugging.
 
 ### 6.3. Infinite Loop Circuit Breaker
 *   To prevent agents from continuously requesting context without resolution, the Go Orchestrator atomically increments a `HopCount` on every state transition.

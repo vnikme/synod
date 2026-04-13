@@ -281,9 +281,7 @@ func (a *DataAgent) Execute(ctx context.Context, job *Job, instructions string, 
 		summaryParts = append(summaryParts, fmt.Sprintf("- %s: %s", f.Key, f.Value))
 	}
 	summary := strings.Join(summaryParts, "\n")
-	if len(summary) > 1000 {
-		summary = summary[:1000] + "…"
-	}
+	summary = truncateRunes(summary, 1000)
 
 	return totalUsage, a.store.UpdateJob(ctx, job.JobID, job.SessionID, []firestore.Update{
 		{Path: "collected_facts", Value: allFacts},

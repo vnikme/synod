@@ -39,10 +39,11 @@
 
     <div class="px-6 py-4 bg-white border-t border-gray-200">
         <form id="chat-form" class="max-w-4xl mx-auto relative">
+            <label for="prompt-input" class="sr-only">Message prompt</label>
             <input type="text" id="prompt-input" autocomplete="off"
                 class="w-full bg-gray-100 border-transparent focus:bg-white focus:border-indigo-500 focus:ring-2 focus:ring-indigo-200 rounded-xl px-5 py-4 pr-16 shadow-sm transition-all outline-none"
                 placeholder="e.g. Compare Q3 revenue for Apple and Microsoft and draw a chart...">
-            <button type="submit" id="submit-btn"
+            <button type="submit" id="submit-btn" aria-label="Send message"
                 class="absolute right-2 top-2 bottom-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg px-4 font-medium transition-colors">
                 Send
             </button>

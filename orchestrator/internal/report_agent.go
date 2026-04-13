@@ -74,10 +74,8 @@ func (a *ReportAgent) Execute(ctx context.Context, job *Job, session *Session, i
 
 	// Build summary for orchestrator
 	summary := fmt.Sprintf("Report agent completed. Generated a %d-character report.", len(report))
-	if len(report) > 300 {
-		summary += "\nReport preview:\n" + report[:300] + "…"
-	} else if report != "" {
-		summary += "\nReport preview:\n" + report
+	if report != "" {
+		summary += "\nReport preview:\n" + truncateRunes(report, 300)
 	}
 
 	// Write final_result but do NOT set terminal state.

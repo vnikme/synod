@@ -220,14 +220,6 @@ func (s *Server) handleReply(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Append user reply to chat history BEFORE resuming the job, so the
-	// orchestrator always sees the clarification when it picks up the task.
-	if err := s.store.AppendChatHistory(ctx, sessionID, ChatMessage{Role: "user", Content: req.Message}); err != nil {
-		slog.Error("reply: append chat history failed", "error", err)
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal error"})
-		return
-	}
-
 	// Atomic resume: CAS HITL → QUEUED+orchestrator, reset hop_count, clear final_result.
 	// Only one concurrent reply succeeds; others get the appropriate error.
 	_, result, err := s.store.ResumeHITLJob(ctx, jobID, sessionID)
@@ -242,6 +234,22 @@ func (s *Server) handleReply(w http.ResponseWriter, r *http.Request) {
 		return
 	case ResumeNotHITL:
 		writeJSON(w, http.StatusConflict, map[string]string{"error": "job is not awaiting user input"})
+		return
+	}
+
+	// Append user reply to chat history AFTER the CAS succeeds, so only one
+	// racing reply ends up in chat_history.
+	if err := s.store.AppendChatHistory(ctx, sessionID, ChatMessage{Role: "user", Content: req.Message}); err != nil {
+		slog.Error("reply: append chat history failed", "error", err)
+		// Roll back to HITL so the user can retry.
+		if rbErr := s.store.UpdateJob(ctx, jobID, sessionID, []firestore.Update{
+			{Path: "status", Value: StatusHITL},
+			{Path: "active_agent", Value: AgentOrchestrator},
+			{Path: "agent_instructions", Value: job.AgentInstructions},
+		}); rbErr != nil {
+			slog.Error("reply: rollback to HITL failed", "error", rbErr, "job_id", jobID)
+		}
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal error"})
 		return
 	}
 
