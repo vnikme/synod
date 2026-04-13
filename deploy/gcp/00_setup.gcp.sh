@@ -39,6 +39,16 @@ gcloud tasks queues create $QUEUE_NAME \
     --location=$REGION \
     --project=$PROJECT_ID || true
 
+# Apply rate limits and retry policy to prevent runaway loops.
+gcloud tasks queues update $QUEUE_NAME \
+    --location=$REGION \
+    --project=$PROJECT_ID \
+    --max-dispatches-per-second=10 \
+    --max-concurrent-dispatches=5 \
+    --max-attempts=5 \
+    --min-backoff=5s \
+    --max-backoff=60s
+
 echo "=== 5. Creating Service Accounts ==="
 gcloud iam service-accounts create $SA_NAME \
     --display-name="Synod Orchestrator SA" \

@@ -88,7 +88,7 @@ func main() {
 		Addr:         ":" + port,
 		Handler:      server,
 		ReadTimeout:  30 * time.Second,
-		WriteTimeout: 120 * time.Second,
+		WriteTimeout: 300 * time.Second,
 		IdleTimeout:  60 * time.Second,
 	}
 

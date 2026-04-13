@@ -66,9 +66,27 @@ func (s *Server) registerRoutes() {
 	s.mux.Handle("POST /internal/agent/analyst", s.internalAuth(http.HandlerFunc(s.handleAgentAnalyst)))
 	s.mux.Handle("POST /internal/agent/report", s.internalAuth(http.HandlerFunc(s.handleAgentReport)))
 
-	// Serve embedded UI — catch-all for unmatched GET requests.
+	// Serve embedded UI — SPA fallback: serve index.html for unmatched GET requests.
 	if s.staticFS != nil {
-		s.mux.Handle("GET /", http.FileServerFS(s.staticFS))
+		s.mux.HandleFunc("GET /", func(w http.ResponseWriter, r *http.Request) {
+			// Try to serve the exact file first; fall back to index.html for SPA routes.
+			if r.URL.Path != "/" {
+				f, err := s.staticFS.Open(strings.TrimPrefix(r.URL.Path, "/"))
+				if err == nil {
+					f.Close()
+					http.FileServerFS(s.staticFS).ServeHTTP(w, r)
+					return
+				}
+			}
+			// Serve index.html for / and any unknown path (SPA catch-all).
+			data, err := fs.ReadFile(s.staticFS, "index.html")
+			if err != nil {
+				http.NotFound(w, r)
+				return
+			}
+			w.Header().Set("Content-Type", "text/html; charset=utf-8")
+			w.Write(data)
+		})
 	}
 }
 
@@ -82,6 +100,7 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleIngest(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20) // 1 MB
 
 	var req IngestRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -170,6 +189,7 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleReply(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	jobID := r.PathValue("jobID")
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20) // 1 MB
 
 	var req ReplyRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {

@@ -4,8 +4,9 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Synod.ai | Multi-Agent Solver</title>
-    <script src="https://cdn.tailwindcss.com"></script>
-    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4.1.4/dist/index.global.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/marked@15.0.7/marked.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/dompurify@3.2.5/dist/purify.min.js"></script>
 </head>
 <body class="bg-gray-50 h-screen flex flex-col font-sans text-gray-800">
     <header class="bg-white border-b border-gray-200 px-6 py-4 flex justify-between items-center shadow-sm z-10">
@@ -112,43 +113,62 @@
         }
 
         // --- Polling ---
-        async function pollJobStatus(jobId) {
+        async function pollJobStatus(messageId, apiJobId) {
+            const jobId = apiJobId || messageId;
             setInputEnabled(false);
             isPolling = true;
+            let pollErrors = 0;
 
             const pollInterval = setInterval(async () => {
                 try {
                     const res = await fetch(`/api/v1/tasks/${encodeURIComponent(jobId)}?session_id=${encodeURIComponent(currentSessionId)}`);
-                    if (!res.ok) return;
+                    if (!res.ok) {
+                        pollErrors++;
+                        if (pollErrors >= 5) {
+                            clearInterval(pollInterval);
+                            isPolling = false;
+                            appendErrorMessage(`Lost connection to server (${res.status}). Please try again.`);
+                            setInputEnabled(true);
+                        }
+                        return;
+                    }
+                    pollErrors = 0;
                     const job = await res.json();
 
-                    const statusEl = document.getElementById(`status-${jobId}`);
-                    const agentEl = document.getElementById(`agent-${jobId}`);
-                    const contentEl = document.getElementById(`content-${jobId}`);
-                    const assetsEl = document.getElementById(`assets-${jobId}`);
+                    const statusEl = document.getElementById(`status-${messageId}`);
+                    const agentEl = document.getElementById(`agent-${messageId}`);
+                    const contentEl = document.getElementById(`content-${messageId}`);
+                    const assetsEl = document.getElementById(`assets-${messageId}`);
 
                     if (!statusEl) { clearInterval(pollInterval); return; }
 
                     // Status text
+                    const spinnerEl = statusEl.querySelector('svg');
                     if (job.status === "HITL") {
                         agentEl.innerText = "Needs your input";
-                        statusEl.querySelector('svg').classList.add('hidden');
-                        statusEl.classList.replace('text-gray-500', 'text-orange-600');
+                        spinnerEl?.classList.add('hidden');
+                        statusEl.classList.remove('text-gray-500', 'text-green-600', 'text-red-600');
+                        statusEl.classList.add('text-orange-600');
                     } else if (job.status === "COMPLETED") {
                         agentEl.innerText = "Completed";
-                        statusEl.querySelector('svg').classList.add('hidden');
-                        statusEl.classList.replace('text-gray-500', 'text-green-600');
+                        spinnerEl?.classList.add('hidden');
+                        statusEl.classList.remove('text-gray-500', 'text-orange-600', 'text-red-600');
+                        statusEl.classList.add('text-green-600');
                     } else if (job.status === "FAILED") {
                         agentEl.innerText = "Failed";
-                        statusEl.querySelector('svg').classList.add('hidden');
-                        statusEl.classList.replace('text-gray-500', 'text-red-600');
+                        spinnerEl?.classList.add('hidden');
+                        statusEl.classList.remove('text-gray-500', 'text-orange-600', 'text-green-600');
+                        statusEl.classList.add('text-red-600');
                     } else {
+                        spinnerEl?.classList.remove('hidden');
+                        statusEl.classList.remove('text-orange-600', 'text-green-600', 'text-red-600');
+                        statusEl.classList.add('text-gray-500');
                         agentEl.innerText = `Active Agent: ${(job.active_agent || '').toUpperCase()} | Status: ${job.status}`;
                     }
 
                     // Content
                     if (job.final_result) {
-                        contentEl.innerHTML = marked.parse(job.final_result);
+                        contentEl.innerHTML = DOMPurify.sanitize(marked.parse(job.final_result));
                     } else if (job.status === "HITL") {
                         contentEl.innerHTML =
                             `<p class="font-medium text-orange-600">I need clarification:</p>` +
@@ -219,9 +239,10 @@
                         return;
                     }
 
-                    // Resume polling the same job
-                    appendAgentMessage(jobId + '-resume');
-                    pollJobStatus(jobId);
+                    // Resume polling — reuse the same jobId for element lookups
+                    const resumeId = jobId + '-r' + Date.now();
+                    appendAgentMessage(resumeId);
+                    pollJobStatus(resumeId, jobId);
                 } catch (err) {
                     console.error("Reply error", err);
                     appendErrorMessage("Network error — could not send reply.");
