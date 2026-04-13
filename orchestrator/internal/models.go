@@ -61,6 +61,7 @@ type Job struct {
 	GeneratedAssets   []Asset   `json:"generated_assets" firestore:"generated_assets"`
 	MissingQueries    []string  `json:"missing_queries" firestore:"missing_queries"`
 	AgentInstructions string    `json:"agent_instructions" firestore:"agent_instructions"`
+	LastAgentSummary  string    `json:"last_agent_summary" firestore:"last_agent_summary"`
 	FinalResult       string    `json:"final_result" firestore:"final_result"`
 	TokenUsage        TokenUsage `json:"token_usage" firestore:"token_usage"`
 	CreatedAt         time.Time `json:"created_at" firestore:"created_at"`

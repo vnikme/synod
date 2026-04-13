@@ -235,9 +235,12 @@ func (a *DataAgent) Execute(ctx context.Context, job *Job, instructions string, 
 			Source: "data_agent",
 		}
 		allFacts := append(job.CollectedFacts, noDataFact)
+		summary := fmt.Sprintf("Data agent completed. Queries attempted: %d. All queries returned no results. Queries: %s",
+			len(queries), strings.Join(queries, "; "))
 		return totalUsage, a.store.UpdateJob(ctx, job.JobID, job.SessionID, []firestore.Update{
 			{Path: "collected_facts", Value: allFacts},
 			{Path: "missing_queries", Value: []string{}},
+			{Path: "last_agent_summary", Value: summary},
 		})
 	}
 
@@ -268,9 +271,24 @@ func (a *DataAgent) Execute(ctx context.Context, job *Job, instructions string, 
 	allFacts := append(job.CollectedFacts, facts...)
 	slog.Info("data agent: done", "job_id", job.JobID, "new_facts", len(facts), "total_facts", len(allFacts))
 
+	var summaryParts []string
+	summaryParts = append(summaryParts, fmt.Sprintf("Data agent completed. Queries attempted: %d. New facts extracted: %d (total: %d).",
+		len(queries), len(facts), len(allFacts)))
+	if len(failedQueries) > 0 {
+		summaryParts = append(summaryParts, fmt.Sprintf("Failed queries: %s.", strings.Join(failedQueries, "; ")))
+	}
+	for _, f := range facts {
+		summaryParts = append(summaryParts, fmt.Sprintf("- %s: %s", f.Key, f.Value))
+	}
+	summary := strings.Join(summaryParts, "\n")
+	if len(summary) > 1000 {
+		summary = summary[:1000] + "…"
+	}
+
 	return totalUsage, a.store.UpdateJob(ctx, job.JobID, job.SessionID, []firestore.Update{
 		{Path: "collected_facts", Value: allFacts},
 		{Path: "missing_queries", Value: []string{}},
+		{Path: "last_agent_summary", Value: summary},
 	})
 }
 

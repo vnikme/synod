@@ -72,10 +72,20 @@ func (a *ReportAgent) Execute(ctx context.Context, job *Job, session *Session, i
 
 	slog.Info("report agent: done", "job_id", job.JobID, "report_len", len(report))
 
+	// Build summary for orchestrator
+	summary := fmt.Sprintf("Report agent completed. Generated a %d-character report.", len(report))
+	if len(report) > 300 {
+		summary += "\nReport preview:\n" + report[:300] + "…"
+	} else if report != "" {
+		summary += "\nReport preview:\n" + report
+	}
+
+	// Write final_result but do NOT set terminal state.
+	// The orchestrator evaluates the report and decides whether to complete
+	// the job or request revisions.
 	if err := a.store.UpdateJob(ctx, job.JobID, job.SessionID, []firestore.Update{
-		{Path: "status", Value: StatusCompleted},
 		{Path: "final_result", Value: report},
-		{Path: "active_agent", Value: AgentOrchestrator},
+		{Path: "last_agent_summary", Value: summary},
 	}); err != nil {
 		return usage, err
 	}

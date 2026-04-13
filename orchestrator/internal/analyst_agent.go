@@ -112,8 +112,22 @@ func (a *AnalystAgent) Execute(ctx context.Context, job *Job, instructions strin
 					Content: result.Stdout,
 				})
 			}
+
+			// Build summary for orchestrator
+			var summaryParts []string
+			summaryParts = append(summaryParts, fmt.Sprintf("Analyst agent completed successfully. Charts produced: %d.", len(result.Charts)))
+			if result.Stdout != "" {
+				preview := result.Stdout
+				if len(preview) > 500 {
+					preview = preview[:500] + "…"
+				}
+				summaryParts = append(summaryParts, "Analysis output:\n"+preview)
+			}
+			summary := strings.Join(summaryParts, "\n")
+
 			return totalUsage, a.store.UpdateJob(ctx, job.JobID, job.SessionID, []firestore.Update{
 				{Path: "generated_assets", Value: assets},
+				{Path: "last_agent_summary", Value: summary},
 			})
 		}
 
