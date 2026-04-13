@@ -177,6 +177,15 @@ func (o *OrchestratorAgent) Execute(ctx context.Context, jobID, sessionID string
 		"job_id", jobID, "next_agent", decision.NextAgent, "reasoning", decision.Reasoning,
 	)
 
+	// Guard: if the analyst already produced output, force routing to report.
+	// Prevents infinite analyst→orchestrator→analyst loops regardless of LLM decision.
+	if decision.NextAgent == "analyst" && len(job.GeneratedAssets) > 0 {
+		slog.Warn("orchestrator: overriding analyst→report (assets already exist)",
+			"job_id", jobID, "num_assets", len(job.GeneratedAssets))
+		decision.NextAgent = "report"
+		decision.Instructions = "Synthesize the collected facts and analysis output into a final report for the user."
+	}
+
 	// Dispatch to chosen agent via Cloud Tasks (async)
 	switch decision.NextAgent {
 	case "data":
