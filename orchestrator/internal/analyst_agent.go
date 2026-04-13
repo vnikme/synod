@@ -47,9 +47,9 @@ func NewAnalystAgent(ctx context.Context, gemini *GeminiClient, store *Store, sa
 	httpClient, err := idtoken.NewClient(ctx, sandboxURL)
 	if err != nil {
 		slog.Warn("idtoken client unavailable, using plain HTTP (sandbox must allow unauthenticated)", "error", err)
-		httpClient = &http.Client{Timeout: 120 * time.Second}
+		httpClient = &http.Client{Timeout: 240 * time.Second}
 	} else {
-		httpClient.Timeout = 120 * time.Second
+		httpClient.Timeout = 240 * time.Second
 	}
 	return &AnalystAgent{
 		gemini:     gemini,
@@ -92,7 +92,10 @@ func (a *AnalystAgent) Execute(ctx context.Context, job *Job, instructions strin
 
 		result, err := a.callSandbox(ctx, code)
 		if err != nil {
-			return totalUsage, fmt.Errorf("sandbox call: %w", err)
+			slog.Warn("analyst agent: sandbox call failed (transient)",
+				"job_id", job.JobID, "attempt", attempt, "error", err)
+			lastError = fmt.Sprintf("sandbox HTTP error: %s", err.Error())
+			continue
 		}
 
 		if result.Success {
