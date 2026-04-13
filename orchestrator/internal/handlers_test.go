@@ -4,10 +4,13 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 	"time"
+
+	"cloud.google.com/go/firestore"
 )
 
 func setupTestServer(t *testing.T) (*Server, *mockStore, *mockDispatcher, *mockGemini) {
@@ -440,6 +443,130 @@ func TestAgentWebhook_InvalidPayload(t *testing.T) {
 	}
 }
 
+// Regression test: previously, a transient Firestore error during post-execution
+// re-read returned HTTP 500, triggering a Cloud Tasks retry. But the retry's
+// ClaimQueuedJob saw IN_PROGRESS (not QUEUED) and ACKed as stale — leaving the
+// job stuck IN_PROGRESS permanently. The fix removes the re-read and ensures
+// HTTP 200 is always returned after the agent claims the job.
+func TestAgentWebhook_CallbackTransitionFails_Returns200(t *testing.T) {
+	srv, store, _, gemini := setupTestServer(t)
+
+	seedSession(store, &Session{SessionID: "sess-1"})
+	seedJob(store, &Job{
+		JobID:       "job-1",
+		SessionID:   "sess-1",
+		Status:      StatusQueued,
+		ActiveAgent: AgentReport,
+		Prompt:      "test",
+	})
+
+	gemini.textResponse = "A report."
+	gemini.usage = TokenUsage{TotalTokens: 10}
+
+	// Make the SECOND UpdateJob call fail (first = report agent writing
+	// final_result, second = handleAgentExec callback transition).
+	callCount := 0
+	store.updateJobFn = func(_ context.Context, jobID, sessionID string, updates []firestore.Update) error {
+		callCount++
+		if callCount == 2 {
+			return fmt.Errorf("simulated Firestore unavailable")
+		}
+		// Default behavior for other calls.
+		store.mu.Lock()
+		defer store.mu.Unlock()
+		job, ok := store.jobs[jobID]
+		if !ok || job.SessionID != sessionID {
+			return fmt.Errorf("job %s not found for session %s", jobID, sessionID)
+		}
+		applyMockUpdates(job, updates)
+		job.UpdatedAt = time.Now()
+		return nil
+	}
+
+	payload := `{"job_id": "job-1", "session_id": "sess-1"}`
+	req := httptest.NewRequest("POST", "/internal/agent/report", bytes.NewBufferString(payload))
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	// MUST return 200 — returning 500 would cause a stuck job (the whole bug)
+	if w.Code != http.StatusOK {
+		t.Errorf("status = %d, want %d — must ACK after agent execution to prevent stuck job", w.Code, http.StatusOK)
+	}
+}
+
+func TestAgentWebhook_AgentFails_FailJobFails_Returns200(t *testing.T) {
+	srv, store, _, gemini := setupTestServer(t)
+
+	seedSession(store, &Session{SessionID: "sess-1"})
+	seedJob(store, &Job{
+		JobID:       "job-1",
+		SessionID:   "sess-1",
+		Status:      StatusQueued,
+		ActiveAgent: AgentReport,
+		Prompt:      "test",
+	})
+
+	// Make the LLM fail (so the report agent returns error)
+	gemini.err = fmt.Errorf("LLM API unavailable")
+
+	// Also make UpdateJob fail (so failJob can't mark FAILED)
+	store.updateJobErr = fmt.Errorf("Firestore unavailable")
+
+	payload := `{"job_id": "job-1", "session_id": "sess-1"}`
+	req := httptest.NewRequest("POST", "/internal/agent/report", bytes.NewBufferString(payload))
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	// MUST return 200 even when both agent AND failJob fail
+	if w.Code != http.StatusOK {
+		t.Errorf("status = %d, want %d — must ACK after claim to prevent stuck retry loop", w.Code, http.StatusOK)
+	}
+}
+
+func TestAgentWebhook_SuccessEnqueuesOrchestrator(t *testing.T) {
+	srv, store, disp, gemini := setupTestServer(t)
+
+	seedSession(store, &Session{SessionID: "sess-1"})
+	seedJob(store, &Job{
+		JobID:       "job-1",
+		SessionID:   "sess-1",
+		Status:      StatusQueued,
+		ActiveAgent: AgentReport,
+		Prompt:      "test",
+	})
+
+	gemini.textResponse = "A report."
+	gemini.usage = TokenUsage{TotalTokens: 10}
+
+	payload := `{"job_id": "job-1", "session_id": "sess-1"}`
+	req := httptest.NewRequest("POST", "/internal/agent/report", bytes.NewBufferString(payload))
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", w.Code, http.StatusOK)
+	}
+
+	// Verify job transitioned to QUEUED+orchestrator
+	job, _ := store.GetJob(context.Background(), "job-1", "sess-1")
+	if job.Status != StatusQueued {
+		t.Errorf("job.Status = %s, want QUEUED", job.Status)
+	}
+	if job.ActiveAgent != AgentOrchestrator {
+		t.Errorf("job.ActiveAgent = %s, want orchestrator", job.ActiveAgent)
+	}
+
+	// Verify orchestrator callback was enqueued
+	disp.mu.Lock()
+	defer disp.mu.Unlock()
+	if len(disp.enqueued) != 1 {
+		t.Fatalf("enqueued = %d, want 1", len(disp.enqueued))
+	}
+	if disp.enqueued[0].URL != "http://localhost:8080/internal/route" {
+		t.Errorf("enqueued URL = %s", disp.enqueued[0].URL)
+	}
+}
+
 // --- SPA Fallback ---
 
 func TestSPA_APIPathReturns404(t *testing.T) {
@@ -464,5 +591,28 @@ func TestSPA_InternalPathReturns404(t *testing.T) {
 
 	if w.Code != http.StatusNotFound {
 		t.Errorf("status = %d, want %d", w.Code, http.StatusNotFound)
+	}
+}
+
+// --- Agent Timeout ---
+
+func TestAgentExecTimeout_Durations(t *testing.T) {
+	tests := []struct {
+		agent   AgentType
+		wantMin time.Duration
+		wantMax time.Duration
+	}{
+		{AgentData, 2 * time.Minute, 2 * time.Minute},
+		{AgentAnalyst, 10 * time.Minute, 10 * time.Minute},
+		{AgentReport, 90 * time.Second, 90 * time.Second},
+		{AgentOrchestrator, 3 * time.Minute, 3 * time.Minute}, // default
+	}
+	for _, tt := range tests {
+		t.Run(string(tt.agent), func(t *testing.T) {
+			got := agentExecTimeout(tt.agent)
+			if got < tt.wantMin || got > tt.wantMax {
+				t.Errorf("agentExecTimeout(%s) = %v, want between %v and %v", tt.agent, got, tt.wantMin, tt.wantMax)
+			}
+		})
 	}
 }

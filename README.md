@@ -112,10 +112,45 @@ make build              # Build docker images to Artifact Registry
 make deploy-all         # Deploy both services
 make deploy-orchestrator
 make deploy-sandbox
-make test               # Run Go unit tests (vet + test)
+make test               # Run Go + Python tests (vet + test + pytest)
+make test-go            # Run Go tests only
+make test-python        # Run Python sandbox tests only
 ```
 
-## 7. Trade-offs (24-Hour Constraint)
+## 7. Troubleshooting
+
+### Stuck Jobs ("IN_PROGRESS" with No Activity)
+
+If a job shows a status like `"ANALYST in progress"` indefinitely with no Cloud Tasks activity, the job is stuck in `IN_PROGRESS` state. This can happen if a transient Firestore error occurs during the post-execution callback (between agent completion and orchestrator re-enqueue).
+
+**Automatic Recovery:** A background sweep runs every 2 minutes and recovers jobs stuck in `IN_PROGRESS` for more than 10 minutes by transitioning them to `QUEUED+orchestrator` and re-enqueuing the orchestrator.
+
+**Symptoms:**
+- UI shows an agent "in progress" for more than 5 minutes
+- No pending Cloud Tasks for the job
+- GCP logs show `CRITICAL` entries with message prefix "CRITICAL:"
+
+**Manual Recovery (Firestore Console):**
+1. Open the [Firestore Console](https://console.cloud.google.com/firestore) for your project.
+2. Navigate to the job document in the top-level `jobs` collection: `jobs/{job_id}`. Verify the `session_id` field matches the expected session.
+3. Set `status` to `"QUEUED"` and `active_agent` to `"orchestrator"`.
+4. Re-enqueue by sending a POST to `/internal/route` with `{"job_id": "...", "session_id": "..."}`, or wait for the next user interaction to trigger a new job.
+
+**Root Cause (Fixed):** Previously, `handleAgentExec` could return HTTP 500 after a successful agent execution if the Firestore re-read failed. This triggered a Cloud Tasks retry, but the retry's `ClaimQueuedJob` saw `IN_PROGRESS` (not `QUEUED`) and silently ACKed as a stale delivery — leaving the job permanently stuck. The fix ensures HTTP 200 is always returned after a successful claim (the "point of no return" pattern), with `CRITICAL`-prefixed `slog.Error` logging for any post-claim failures that require operator attention.
+
+### Key Log Messages
+
+These messages are logged via `slog.Error` with a `CRITICAL:` prefix in the message text. They are not a separate log level; filter for the message prefix or structured fields in your logging pipeline.
+
+| Severity (message prefix) | Message Pattern | Meaning |
+|---------------------------|----------------|---------|
+| `CRITICAL` | `failed to mark job as FAILED` | Agent failed AND the status update to FAILED also failed. Job stuck IN_PROGRESS — recovery sweep will handle. |
+| `CRITICAL` | `callback transition failed` | Agent succeeded but the QUEUED+orchestrator transition failed. Job stuck IN_PROGRESS — recovery sweep will handle. |
+| `CRITICAL` | `enqueue callback failed` | Agent succeeded, job is QUEUED+orchestrator, but no Cloud Task was created. Requires manual re-enqueue. |
+| `CRITICAL` | `panic in agent execution` | Agent code panicked after claiming the job. Job left IN_PROGRESS — recovery sweep will handle. |
+| `WARN` | `stale/duplicate delivery` | A Cloud Tasks retry arrived for an already-claimed job. Usually benign (at-least-once delivery). |
+
+## 8. Trade-offs (24-Hour Constraint)
 *   **Authentication:** JWT verification and strict IDOR prevention are omitted for this prototype. However, strict logical session isolation (via `session_id`) and service-to-service OIDC auth are implemented.
 *   **Database:** Firestore was chosen for rapid prototyping over PostgreSQL (JSONB). In a mature production environment, Postgres would provide stronger transactional guarantees.
 *   **Secrets Management:** API keys are passed as plain environment variables. In production, GCP Secret Manager with `--set-secrets` should be used.

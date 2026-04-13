@@ -51,14 +51,12 @@ func TestReportAgent_Success(t *testing.T) {
 		t.Error("expected last_agent_summary to be populated")
 	}
 
-	// Verify report was appended to session chat history
+	// Note: chat_history append is now done by the orchestrator's "complete"
+	// handler, not the report agent. This prevents duplicate reports when the
+	// orchestrator sends the report back for revision.
 	updatedSess, _ := store.GetSession(context.Background(), "sess-1")
-	if len(updatedSess.ChatHistory) < 2 {
-		t.Errorf("chat_history length = %d, want >= 2", len(updatedSess.ChatHistory))
-	}
-	lastMsg := updatedSess.ChatHistory[len(updatedSess.ChatHistory)-1]
-	if lastMsg.Role != "assistant" {
-		t.Errorf("last message role = %s, want assistant", lastMsg.Role)
+	if len(updatedSess.ChatHistory) != 1 {
+		t.Errorf("chat_history length = %d, want 1 (report agent should NOT append)", len(updatedSess.ChatHistory))
 	}
 }
 

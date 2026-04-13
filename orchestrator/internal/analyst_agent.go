@@ -20,15 +20,21 @@ const maxCodeRetries = 3
 const codeGenSystemPrompt = `You are a Python data analyst. Generate executable Python code for the requested analysis.
 Today's date is %s.
 
-Available libraries: pandas, numpy, matplotlib.pyplot, math, statistics, json, datetime, re.
-You MUST import any library you use (e.g., import pandas as pd).
+Available libraries: pandas, numpy, matplotlib.pyplot, math, statistics, json, datetime, re, collections, itertools, csv.
+
+IMPORTANT CONSTRAINTS — the sandbox has NO network access:
+- Do NOT use yfinance, requests, urllib, pandas_datareader, httpx, aiohttp, or any data-fetching library.
+- Do NOT use pd.read_html(), pd.read_csv() with URLs, or any function that makes HTTP calls.
+- Do NOT use open() or read files from disk.
+- ALL data MUST be embedded directly in the code as Python literals (lists, dicts, DataFrames).
+- Use the provided facts/data below and convert them into Python data structures.
+- If exact daily data is not available, create a DataFrame from the data points given and note the data source.
 
 Rules:
+- You MUST import any library you use (e.g., import pandas as pd).
 - Use print() to output text results and insights.
 - Use matplotlib to create charts. Call plt.figure() before each chart.
 - Do NOT call plt.show() — charts are captured automatically.
-- Do NOT read files or make network calls. All data must be embedded in the code.
-- Embed the provided facts as Python data structures (lists, dicts, DataFrames).
 - Keep code concise and focused on the requested analysis.
 - Add brief comments explaining each analysis step.
 

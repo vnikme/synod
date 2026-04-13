@@ -82,21 +82,11 @@ func (a *ReportAgent) Execute(ctx context.Context, job *Job, session *Session, i
 	// Write final_result but do NOT set terminal state.
 	// The orchestrator evaluates the report and decides whether to complete
 	// the job or request revisions.
-	if err := a.store.UpdateJob(ctx, job.JobID, job.SessionID, []firestore.Update{
+	// NOTE: chat_history append is deferred to the orchestrator's "complete"
+	// handler so that only the final accepted report is appended (not
+	// intermediate drafts that may be revised).
+	return usage, a.store.UpdateJob(ctx, job.JobID, job.SessionID, []firestore.Update{
 		{Path: "final_result", Value: report},
 		{Path: "last_agent_summary", Value: summary},
-	}); err != nil {
-		return usage, err
-	}
-
-	// Append report to session chat history for multi-turn context
-	if session != nil {
-		if err := a.store.AppendChatHistory(ctx, job.SessionID, ChatMessage{
-			Role: "assistant", Content: report,
-		}); err != nil {
-			slog.Error("failed to append report to chat history", "error", err)
-		}
-	}
-
-	return usage, nil
+	})
 }

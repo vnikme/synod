@@ -158,10 +158,11 @@ func TestOrchestrator_RouteToAnalyst(t *testing.T) {
 
 	seedSession(store, &Session{SessionID: "sess-1"})
 	seedJob(store, &Job{
-		JobID:       "job-1",
-		SessionID:   "sess-1",
-		Status:      StatusQueued,
-		ActiveAgent: AgentOrchestrator,
+		JobID:         "job-1",
+		SessionID:     "sess-1",
+		Status:        StatusQueued,
+		ActiveAgent:   AgentOrchestrator,
+		CollectedFacts: []Fact{{Key: "revenue", Value: "$1B", Source: "web"}},
 	})
 
 	err := orch.Execute(context.Background(), "job-1", "sess-1")
@@ -187,10 +188,11 @@ func TestOrchestrator_RouteToReport(t *testing.T) {
 
 	seedSession(store, &Session{SessionID: "sess-1"})
 	seedJob(store, &Job{
-		JobID:       "job-1",
-		SessionID:   "sess-1",
-		Status:      StatusQueued,
-		ActiveAgent: AgentOrchestrator,
+		JobID:         "job-1",
+		SessionID:     "sess-1",
+		Status:        StatusQueued,
+		ActiveAgent:   AgentOrchestrator,
+		CollectedFacts: []Fact{{Key: "data", Value: "some data", Source: "web"}},
 	})
 
 	err := orch.Execute(context.Background(), "job-1", "sess-1")
@@ -265,14 +267,14 @@ func TestOrchestrator_RouteToAskUser(t *testing.T) {
 	}
 }
 
-func TestOrchestrator_DataNoQueries_Fails(t *testing.T) {
+func TestOrchestrator_DataNoQueries_RedirectsToAskUser(t *testing.T) {
 	store := newMockStore()
 	disp := &mockDispatcher{}
 	gemini := mockGeminiWithJSON(RoutingDecision{
 		NextAgent:    "data",
 		Reasoning:    "need facts",
 		Instructions: "get data",
-		Queries:      []string{}, // empty queries — should fail
+		Queries:      []string{}, // empty queries — guardrail redirects to ask_user
 	})
 	orch := NewOrchestratorAgent(gemini, store, disp, "http://localhost:8080")
 
@@ -290,8 +292,8 @@ func TestOrchestrator_DataNoQueries_Fails(t *testing.T) {
 	}
 
 	job, _ := store.GetJob(context.Background(), "job-1", "sess-1")
-	if job.Status != StatusFailed {
-		t.Errorf("job.Status = %s, want FAILED", job.Status)
+	if job.Status != StatusHITL {
+		t.Errorf("job.Status = %s, want HITL (guardrail redirected data-no-queries to ask_user)", job.Status)
 	}
 }
 
@@ -523,5 +525,303 @@ func TestE2E_HITLCycle(t *testing.T) {
 	final, _ := store.GetJob(context.Background(), "job-1", "sess-1")
 	if final.Status != StatusCompleted {
 		t.Errorf("final status = %s, want COMPLETED", final.Status)
+	}
+}
+
+// --- validateDecision tests ---
+
+func TestValidateDecision_DataNoQueries_RedirectsToAskUser(t *testing.T) {
+	d := &RoutingDecision{NextAgent: "data", Reasoning: "need data", Instructions: "fetch info"}
+	job := &Job{JobID: "j1"}
+
+	result := validateDecision(d, job)
+	if result.NextAgent != "ask_user" {
+		t.Errorf("NextAgent = %s, want ask_user", result.NextAgent)
+	}
+}
+
+func TestValidateDecision_DataWithQueries_PassesThrough(t *testing.T) {
+	d := &RoutingDecision{NextAgent: "data", Queries: []string{"q1"}, Reasoning: "search"}
+	job := &Job{JobID: "j1"}
+
+	result := validateDecision(d, job)
+	if result.NextAgent != "data" {
+		t.Errorf("NextAgent = %s, want data", result.NextAgent)
+	}
+}
+
+func TestValidateDecision_AnalystNoFacts_RedirectsToData(t *testing.T) {
+	d := &RoutingDecision{NextAgent: "analyst", Reasoning: "analyze", Instructions: "run analysis"}
+	job := &Job{JobID: "j1", Prompt: "test prompt"}
+
+	result := validateDecision(d, job)
+	if result.NextAgent != "data" {
+		t.Errorf("NextAgent = %s, want data", result.NextAgent)
+	}
+	if len(result.Queries) == 0 {
+		t.Error("expected queries to include the job prompt as fallback")
+	}
+}
+
+func TestValidateDecision_AnalystWithFacts_PassesThrough(t *testing.T) {
+	d := &RoutingDecision{NextAgent: "analyst", Reasoning: "analyze"}
+	job := &Job{JobID: "j1", CollectedFacts: []Fact{{Key: "k", Value: "v"}}}
+
+	result := validateDecision(d, job)
+	if result.NextAgent != "analyst" {
+		t.Errorf("NextAgent = %s, want analyst", result.NextAgent)
+	}
+}
+
+func TestValidateDecision_AnalystWithAssets_PassesThrough(t *testing.T) {
+	d := &RoutingDecision{NextAgent: "analyst", Reasoning: "re-analyze"}
+	job := &Job{JobID: "j1", GeneratedAssets: []Asset{{Type: "chart", Name: "c.png"}}}
+
+	result := validateDecision(d, job)
+	if result.NextAgent != "analyst" {
+		t.Errorf("NextAgent = %s, want analyst", result.NextAgent)
+	}
+}
+
+func TestValidateDecision_ReportNoContent_RedirectsToAskUser(t *testing.T) {
+	d := &RoutingDecision{NextAgent: "report", Reasoning: "synthesize"}
+	job := &Job{JobID: "j1"}
+
+	result := validateDecision(d, job)
+	if result.NextAgent != "ask_user" {
+		t.Errorf("NextAgent = %s, want ask_user", result.NextAgent)
+	}
+}
+
+func TestValidateDecision_ReportWithFacts_PassesThrough(t *testing.T) {
+	d := &RoutingDecision{NextAgent: "report", Reasoning: "synthesize"}
+	job := &Job{JobID: "j1", CollectedFacts: []Fact{{Key: "k", Value: "v"}}}
+
+	result := validateDecision(d, job)
+	if result.NextAgent != "report" {
+		t.Errorf("NextAgent = %s, want report", result.NextAgent)
+	}
+}
+
+func TestValidateDecision_CompleteNoReport_RedirectsToReport(t *testing.T) {
+	d := &RoutingDecision{NextAgent: "complete", Reasoning: "done"}
+	job := &Job{JobID: "j1"}
+
+	result := validateDecision(d, job)
+	if result.NextAgent != "report" {
+		t.Errorf("NextAgent = %s, want report", result.NextAgent)
+	}
+}
+
+func TestValidateDecision_CompleteWithReport_PassesThrough(t *testing.T) {
+	d := &RoutingDecision{NextAgent: "complete", Reasoning: "done"}
+	job := &Job{JobID: "j1", FinalResult: "A report"}
+
+	result := validateDecision(d, job)
+	if result.NextAgent != "complete" {
+		t.Errorf("NextAgent = %s, want complete", result.NextAgent)
+	}
+}
+
+func TestValidateDecision_AskUser_AlwaysPassesThrough(t *testing.T) {
+	d := &RoutingDecision{NextAgent: "ask_user", Instructions: "clarify?"}
+	job := &Job{JobID: "j1"}
+
+	result := validateDecision(d, job)
+	if result.NextAgent != "ask_user" {
+		t.Errorf("NextAgent = %s, want ask_user", result.NextAgent)
+	}
+}
+
+// --- compactFacts tests ---
+
+func TestCompactFacts_Empty(t *testing.T) {
+	result := compactFacts(nil)
+	if result != nil {
+		t.Errorf("expected nil, got %v", result)
+	}
+	result = compactFacts([]Fact{})
+	if len(result) != 0 {
+		t.Errorf("expected empty, got %v", result)
+	}
+}
+
+func TestCompactFacts_Deduplication(t *testing.T) {
+	facts := []Fact{
+		{Key: "revenue", Value: "old-value", Source: "web"},
+		{Key: "profit", Value: "100", Source: "sec"},
+		{Key: "revenue", Value: "new-value", Source: "web"},
+	}
+	result := compactFacts(facts)
+	if len(result) != 2 {
+		t.Fatalf("len = %d, want 2 (deduplicated)", len(result))
+	}
+	// "revenue" should have the newer value
+	for _, f := range result {
+		if f.Key == "revenue" && f.Value != "new-value" {
+			t.Errorf("revenue value = %q, want 'new-value' (last wins)", f.Value)
+		}
+	}
+}
+
+func TestCompactFacts_CapsAtLimit(t *testing.T) {
+	facts := make([]Fact, maxFactsForLLM+10)
+	for i := range facts {
+		facts[i] = Fact{Key: fmt.Sprintf("key-%d", i), Value: "v", Source: "web"}
+	}
+	result := compactFacts(facts)
+	if len(result) != maxFactsForLLM {
+		t.Errorf("len = %d, want %d (capped)", len(result), maxFactsForLLM)
+	}
+}
+
+func TestCompactFacts_TruncatesValues(t *testing.T) {
+	longValue := ""
+	for i := 0; i < maxFactValueRunes+50; i++ {
+		longValue += "x"
+	}
+	facts := []Fact{{Key: "k", Value: longValue, Source: "web"}}
+	result := compactFacts(facts)
+	if len(result) != 1 {
+		t.Fatalf("len = %d, want 1", len(result))
+	}
+	// Value should be truncated + "…"
+	runes := []rune(result[0].Value)
+	if len(runes) > maxFactValueRunes+1 { // +1 for "…"
+		t.Errorf("value runes = %d, want <= %d", len(runes), maxFactValueRunes+1)
+	}
+}
+
+func TestCompactFacts_PreservesSourceAndKey(t *testing.T) {
+	facts := []Fact{{Key: "mykey", Value: "myval", Source: "sec_edgar"}}
+	result := compactFacts(facts)
+	if result[0].Key != "mykey" || result[0].Source != "sec_edgar" {
+		t.Errorf("key/source mangled: %+v", result[0])
+	}
+}
+
+// --- compactChatHistory tests ---
+
+func TestCompactChatHistory_UnderLimit(t *testing.T) {
+	msgs := []ChatMessage{{Role: "user", Content: "hello"}}
+	result := compactChatHistory(msgs)
+	if len(result) != 1 {
+		t.Errorf("len = %d, want 1", len(result))
+	}
+}
+
+func TestCompactChatHistory_ExactlyAtLimit(t *testing.T) {
+	msgs := make([]ChatMessage, maxChatHistoryForLLM)
+	for i := range msgs {
+		msgs[i] = ChatMessage{Role: "user", Content: fmt.Sprintf("msg-%d", i)}
+	}
+	result := compactChatHistory(msgs)
+	if len(result) != maxChatHistoryForLLM {
+		t.Errorf("len = %d, want %d", len(result), maxChatHistoryForLLM)
+	}
+}
+
+func TestCompactChatHistory_OverLimit_KeepsFirstAndTail(t *testing.T) {
+	total := maxChatHistoryForLLM + 10
+	msgs := make([]ChatMessage, total)
+	for i := range msgs {
+		msgs[i] = ChatMessage{Role: "user", Content: fmt.Sprintf("msg-%d", i)}
+	}
+
+	result := compactChatHistory(msgs)
+	if len(result) != maxChatHistoryForLLM {
+		t.Fatalf("len = %d, want %d", len(result), maxChatHistoryForLLM)
+	}
+
+	// First message is always preserved
+	if result[0].Content != "msg-0" {
+		t.Errorf("first message = %q, want 'msg-0'", result[0].Content)
+	}
+
+	// Last message is the tail
+	lastIdx := total - 1
+	if result[len(result)-1].Content != fmt.Sprintf("msg-%d", lastIdx) {
+		t.Errorf("last message = %q, want 'msg-%d'", result[len(result)-1].Content, lastIdx)
+	}
+
+	// Messages in the middle are skipped (tail starts after the gap)
+	tailStart := total - (maxChatHistoryForLLM - 1)
+	if result[1].Content != fmt.Sprintf("msg-%d", tailStart) {
+		t.Errorf("second message = %q, want 'msg-%d' (tail start)", result[1].Content, tailStart)
+	}
+}
+
+// --- Complete appends chat history ---
+
+func TestOrchestrator_Complete_AppendsChatHistory(t *testing.T) {
+	store := newMockStore()
+	disp := &mockDispatcher{}
+	gemini := mockGeminiWithJSON(RoutingDecision{
+		NextAgent: "complete",
+		Reasoning: "report ready",
+	})
+	orch := NewOrchestratorAgent(gemini, store, disp, "http://localhost:8080")
+
+	seedSession(store, &Session{
+		SessionID:   "sess-1",
+		ChatHistory: []ChatMessage{{Role: "user", Content: "Analyze something"}},
+	})
+	seedJob(store, &Job{
+		JobID:       "job-1",
+		SessionID:   "sess-1",
+		Status:      StatusQueued,
+		ActiveAgent: AgentOrchestrator,
+		FinalResult: "The final report content.",
+	})
+
+	err := orch.Execute(context.Background(), "job-1", "sess-1")
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+
+	// Verify report was appended to chat history
+	sess, _ := store.GetSession(context.Background(), "sess-1")
+	if len(sess.ChatHistory) != 2 {
+		t.Fatalf("chat_history length = %d, want 2", len(sess.ChatHistory))
+	}
+	last := sess.ChatHistory[1]
+	if last.Role != "assistant" || last.Content != "The final report content." {
+		t.Errorf("last chat message = %+v, want assistant report", last)
+	}
+}
+
+func TestOrchestrator_Complete_EmptyResult_NoAppend(t *testing.T) {
+	store := newMockStore()
+	disp := &mockDispatcher{}
+	// LLM says "complete" but validateDecision redirects to "report"
+	// because FinalResult is empty.
+	gemini := mockGeminiWithJSON(RoutingDecision{
+		NextAgent: "complete",
+		Reasoning: "done",
+	})
+	orch := NewOrchestratorAgent(gemini, store, disp, "http://localhost:8080")
+
+	seedSession(store, &Session{
+		SessionID:   "sess-1",
+		ChatHistory: []ChatMessage{{Role: "user", Content: "hello"}},
+	})
+	seedJob(store, &Job{
+		JobID:          "job-1",
+		SessionID:      "sess-1",
+		Status:         StatusQueued,
+		ActiveAgent:    AgentOrchestrator,
+		CollectedFacts: []Fact{{Key: "k", Value: "v"}},
+		// No FinalResult — guardrail redirects to report
+	})
+
+	err := orch.Execute(context.Background(), "job-1", "sess-1")
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+
+	// Should NOT have appended anything (redirected to report, not complete)
+	sess, _ := store.GetSession(context.Background(), "sess-1")
+	if len(sess.ChatHistory) != 1 {
+		t.Errorf("chat_history length = %d, want 1 (no report appended)", len(sess.ChatHistory))
 	}
 }

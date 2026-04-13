@@ -148,6 +148,7 @@ func TestFetchEDGAR(t *testing.T) {
 		fetched:  time.Now(),
 	}
 
+	// Test that the agent handles EDGAR response parsing
 	ctx := context.Background()
 
 	// Seed job
