@@ -91,7 +91,7 @@ curl -X POST "https://synod.ai.church/api/v1/tasks/{job_id}/reply" \
 2.  Create `deploy/gcp/.env` from the example and fill in secrets:
     ```bash
     cp deploy/gcp/.env.example deploy/gcp/.env
-    # Edit: GEMINI_API_KEY, GOOGLE_CSE_API_KEY, GOOGLE_CSE_CX, SEC_EDGAR_USER_AGENT
+    # Edit: GEMINI_API_KEY, SEC_EDGAR_USER_AGENT
     ```
 3.  Deploy both services (sandbox first, then orchestrator):
     ```bash
@@ -116,4 +116,4 @@ make deploy-sandbox
 *   **Authentication:** JWT verification and strict IDOR prevention are omitted for this prototype. However, strict logical session isolation (via `session_id`) and service-to-service OIDC auth are implemented.
 *   **Database:** Firestore was chosen for rapid prototyping over PostgreSQL (JSONB). In a mature production environment, Postgres would provide stronger transactional guarantees.
 *   **Secrets Management:** API keys are passed as plain environment variables. In production, GCP Secret Manager with `--set-secrets` should be used.
-*   **Data Sources:** The `Data Agent` relies on Google Custom Search and the SEC EDGAR API. In production, a robust headless browser (e.g., Playwright) or a commercial data API would improve extraction reliability.
+*   **Data Sources:** The `Data Agent` uses Gemini's built-in Google Search grounding and the SEC EDGAR API. In production, a commercial financial data API would improve extraction reliability.

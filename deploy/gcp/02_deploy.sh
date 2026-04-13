@@ -66,7 +66,7 @@ deploy_sandbox() {
         --no-allow-unauthenticated \
         --memory=1Gi \
         --cpu=1 \
-        --timeout=60 \
+        --timeout=300 \
         --max-instances=5 \
         --set-env-vars="GCP_PROJECT_ID=$PROJECT_ID"
 
@@ -117,8 +117,7 @@ ORCHESTRATOR_BASE_URL=$ORCHESTRATOR_URL,\
 SANDBOX_URL=$SANDBOX_URL,\
 LLM_MODEL=gemini-2.5-flash,\
 GEMINI_API_KEY=$GEMINI_API_KEY,\
-GOOGLE_CSE_API_KEY=${GOOGLE_CSE_API_KEY:-},\
-GOOGLE_CSE_CX=${GOOGLE_CSE_CX:-},\
+
 SEC_EDGAR_USER_AGENT=${SEC_EDGAR_USER_AGENT:-}"
 
     echo "✅ Orchestrator deployed."

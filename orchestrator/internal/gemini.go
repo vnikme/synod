@@ -100,9 +100,8 @@ func (g *GeminiClient) GenerateText(ctx context.Context, system, prompt string) 
 
 // SearchResult represents a single web search result from Gemini grounding.
 type SearchResult struct {
-	Title   string
-	Snippet string
-	URL     string
+	Title string
+	URL   string
 }
 
 // SearchWeb performs a web search using Gemini's built-in Google Search grounding.

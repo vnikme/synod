@@ -232,7 +232,7 @@ func (o *OrchestratorAgent) Execute(ctx context.Context, jobID, sessionID string
 			{Path: "status", Value: StatusHITL},
 			{Path: "active_agent", Value: AgentOrchestrator},
 			{Path: "agent_instructions", Value: decision.Instructions},
-			{Path: "final_result", Value: decision.Instructions},
+			{Path: "final_result", Value: ""},
 		})
 
 	case "complete":
