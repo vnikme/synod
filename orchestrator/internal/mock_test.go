@@ -29,6 +29,10 @@ type mockStore struct {
 	claimJobErr      error
 	resumeHITLErr    error
 	appendAuditErr   error
+
+	// Function override — when set, replaces the default UpdateJob logic entirely.
+	// Useful for per-call error injection (e.g., fail on the Nth call).
+	updateJobFn func(ctx context.Context, jobID, sessionID string, updates []firestore.Update) error
 }
 
 func newMockStore() *mockStore {
@@ -110,10 +114,16 @@ func (m *mockStore) GetJob(_ context.Context, jobID, sessionID string) (*Job, er
 		return nil, nil // session isolation
 	}
 	cp := *job
+	cp.CollectedFacts = append([]Fact{}, job.CollectedFacts...)
+	cp.GeneratedAssets = append([]Asset{}, job.GeneratedAssets...)
+	cp.MissingQueries = append([]string{}, job.MissingQueries...)
 	return &cp, nil
 }
 
-func (m *mockStore) UpdateJob(_ context.Context, jobID, sessionID string, updates []firestore.Update) error {
+func (m *mockStore) UpdateJob(ctx context.Context, jobID, sessionID string, updates []firestore.Update) error {
+	if m.updateJobFn != nil {
+		return m.updateJobFn(ctx, jobID, sessionID, updates)
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.updateJobErr != nil {

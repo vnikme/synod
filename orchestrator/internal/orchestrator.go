@@ -121,7 +121,7 @@ func (o *OrchestratorAgent) Execute(ctx context.Context, jobID, sessionID string
 	// Terminal states — no-op
 	switch job.Status {
 	case StatusCompleted, StatusFailed, StatusHITL:
-		slog.Info("orchestrator: terminal state, skipping", "job_id", jobID, "status", job.Status)
+		slog.Info("orchestrator: terminal state, skipping", "job_id", jobID, "session_id", sessionID, "status", job.Status)
 		return nil
 	}
 
@@ -129,7 +129,7 @@ func (o *OrchestratorAgent) Execute(ctx context.Context, jobID, sessionID string
 	// Prevents duplicate /internal/route deliveries from overwriting an in-flight agent.
 	if job.ActiveAgent != AgentOrchestrator {
 		slog.Warn("orchestrator: not active agent, skipping duplicate delivery",
-			"job_id", jobID, "active_agent", job.ActiveAgent)
+			"job_id", jobID, "session_id", sessionID, "active_agent", job.ActiveAgent)
 		return nil
 	}
 
@@ -139,7 +139,7 @@ func (o *OrchestratorAgent) Execute(ctx context.Context, jobID, sessionID string
 		return fmt.Errorf("increment hop count: %w", err)
 	}
 	if newHop > maxHops {
-		slog.Warn("circuit breaker triggered", "job_id", jobID, "hop_count", newHop)
+		slog.Warn("circuit breaker triggered", "job_id", jobID, "session_id", sessionID, "hop_count", newHop)
 		return o.store.UpdateJob(ctx, jobID, sessionID, []firestore.Update{
 			{Path: "status", Value: StatusHITL},
 			{Path: "active_agent", Value: AgentOrchestrator},
@@ -177,7 +177,7 @@ func (o *OrchestratorAgent) Execute(ctx context.Context, jobID, sessionID string
 		slog.Error("audit log failed", "job_id", jobID, "agent", "orchestrator", "error", err)
 	}
 	slog.Info("orchestrator: routing decision",
-		"job_id", jobID, "next_agent", decision.NextAgent, "reasoning", decision.Reasoning,
+		"job_id", jobID, "session_id", sessionID, "next_agent", decision.NextAgent, "reasoning", decision.Reasoning,
 	)
 
 	// Dispatch to chosen agent via Cloud Tasks (async)

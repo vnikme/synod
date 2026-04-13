@@ -115,7 +115,35 @@ make deploy-sandbox
 make test               # Run Go unit tests (vet + test)
 ```
 
-## 7. Trade-offs (24-Hour Constraint)
+## 7. Troubleshooting
+
+### Stuck Jobs ("IN_PROGRESS" with No Activity)
+
+If a job shows a status like `"ANALYST in progress"` indefinitely with no Cloud Tasks activity, the job is stuck in `IN_PROGRESS` state. This can happen if a transient Firestore error occurs during the post-execution callback (between agent completion and orchestrator re-enqueue).
+
+**Symptoms:**
+- UI shows an agent "in progress" for more than 5 minutes
+- No pending Cloud Tasks for the job
+- GCP logs show `CRITICAL` entries mentioning "manual intervention required"
+
+**Recovery (Firestore Console):**
+1. Open the [Firestore Console](https://console.cloud.google.com/firestore) for your project.
+2. Navigate to the job document under `sessions/{session_id}/jobs/{job_id}`.
+3. Set `status` to `"QUEUED"` and `active_agent` to `"orchestrator"`.
+4. Re-enqueue by sending a POST to `/internal/route` with `{"job_id": "...", "session_id": "..."}`, or wait for the next user interaction to trigger a new job.
+
+**Root Cause (Fixed):** Previously, `handleAgentExec` could return HTTP 500 after a successful agent execution if the Firestore re-read failed. This triggered a Cloud Tasks retry, but the retry's `ClaimQueuedJob` saw `IN_PROGRESS` (not `QUEUED`) and silently ACKed as a stale delivery — leaving the job permanently stuck. The fix ensures HTTP 200 is always returned after a successful claim (the "point of no return" pattern), with `CRITICAL`-level logging for any post-claim failures that require operator attention.
+
+### Key Log Messages
+
+| Log Level | Message Pattern | Meaning |
+|-----------|----------------|---------|
+| `CRITICAL` | `failed to mark job as FAILED` | Agent failed AND the status update to FAILED also failed. Job stuck IN_PROGRESS. |
+| `CRITICAL` | `callback transition failed` | Agent succeeded but the QUEUED+orchestrator transition failed. Job stuck IN_PROGRESS. |
+| `CRITICAL` | `enqueue callback failed` | Agent succeeded, job is QUEUED+orchestrator, but no Cloud Task was created. Job is recoverable but stalled. |
+| `WARN` | `stale/duplicate delivery` | A Cloud Tasks retry arrived for an already-claimed job. Usually benign (at-least-once delivery). |
+
+## 8. Trade-offs (24-Hour Constraint)
 *   **Authentication:** JWT verification and strict IDOR prevention are omitted for this prototype. However, strict logical session isolation (via `session_id`) and service-to-service OIDC auth are implemented.
 *   **Database:** Firestore was chosen for rapid prototyping over PostgreSQL (JSONB). In a mature production environment, Postgres would provide stronger transactional guarantees.
 *   **Secrets Management:** API keys are passed as plain environment variables. In production, GCP Secret Manager with `--set-secrets` should be used.

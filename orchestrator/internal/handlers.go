@@ -294,16 +294,16 @@ func (s *Server) handleRoute(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	slog.Info("route: received", "job_id", jobID)
+	slog.Info("route: received", "job_id", jobID, "session_id", sessionID)
 
 	if err := s.orchestrator.Execute(ctx, jobID, sessionID); err != nil {
 		if IsPermanentError(err) {
 			// Non-retryable: ACK the task so Cloud Tasks stops retrying.
-			slog.Warn("orchestrator permanent error (not retrying)", "job_id", jobID, "error", err)
+			slog.Warn("orchestrator permanent error (not retrying)", "job_id", jobID, "session_id", sessionID, "error", err)
 			w.WriteHeader(http.StatusOK)
 			return
 		}
-		slog.Error("orchestrator execution failed", "job_id", jobID, "error", err)
+		slog.Error("orchestrator execution failed", "job_id", jobID, "session_id", sessionID, "error", err)
 		// Return 500 so Cloud Tasks retries on transient errors.
 		// Agent-level failures are handled internally (failJob marks FAILED and returns nil).
 		http.Error(w, "orchestrator error", http.StatusInternalServerError)
@@ -334,7 +334,13 @@ func parseAgentPayload(r *http.Request) (string, string, error) {
 }
 
 // handleAgentExec is the shared pattern for all agent webhook handlers:
-// parse payload → read job → run agent → audit → handle error → callback to orchestrator.
+// parse payload → claim job → run agent → audit → callback to orchestrator.
+//
+// CRITICAL INVARIANT: After ClaimQueuedJob succeeds (CAS QUEUED→IN_PROGRESS),
+// this handler MUST return HTTP 200. Returning 5xx would trigger a Cloud Tasks
+// retry, but the retry's ClaimQueuedJob would see IN_PROGRESS (not QUEUED) and
+// silently ACK as a stale delivery — leaving the job stuck IN_PROGRESS forever.
+// All post-claim errors are handled best-effort with loud logging.
 func (s *Server) handleAgentExec(w http.ResponseWriter, r *http.Request, agent AgentType, run func(ctx context.Context, job *Job) (TokenUsage, error)) {
 	ctx := r.Context()
 
@@ -344,22 +350,35 @@ func (s *Server) handleAgentExec(w http.ResponseWriter, r *http.Request, agent A
 		return
 	}
 
-	slog.Info("agent webhook: received", "agent", agent, "job_id", jobID)
+	slog.Info("agent webhook: received", "agent", agent, "job_id", jobID, "session_id", sessionID)
 
 	// Atomic claim: compare-and-swap QUEUED+agent → IN_PROGRESS.
 	// Prevents duplicate Cloud Tasks deliveries from both executing the agent.
 	job, err := s.store.ClaimQueuedJob(ctx, jobID, sessionID, agent)
 	if err != nil {
-		slog.Error("agent: claim job failed", "agent", agent, "job_id", jobID, "error", err)
+		slog.Error("agent: claim job failed", "agent", agent, "job_id", jobID, "session_id", sessionID, "error", err)
 		http.Error(w, "claim job failed", http.StatusInternalServerError)
 		return
 	}
 	if job == nil {
 		slog.Warn("agent: stale/duplicate delivery, skipping",
-			"agent", agent, "job_id", jobID)
+			"agent", agent, "job_id", jobID, "session_id", sessionID)
 		w.WriteHeader(http.StatusOK) // ACK — don't retry
 		return
 	}
+
+	// ---------------------------------------------------------------
+	// POINT OF NO RETURN — always ACK (HTTP 200) after this line.
+	//
+	// The job has been claimed (CAS QUEUED→IN_PROGRESS). Returning a
+	// 5xx would trigger a Cloud Tasks retry, but the retry's
+	// ClaimQueuedJob would see IN_PROGRESS (not QUEUED) and silently
+	// ACK as a stale delivery — leaving the job stuck IN_PROGRESS
+	// permanently with no recovery path.
+	//
+	// All subsequent Firestore/enqueue errors are handled best-effort
+	// with CRITICAL-level logging for operator alerting.
+	// ---------------------------------------------------------------
 
 	// Execute the agent
 	usage, agentErr := run(ctx, job)
@@ -372,12 +391,12 @@ func (s *Server) handleAgentExec(w http.ResponseWriter, r *http.Request, agent A
 	if auditErr := s.store.AppendAuditLog(ctx, jobID, sessionID, AuditEntry{
 		Agent: agent, Action: "execute", Tokens: usage, Detail: detail,
 	}); auditErr != nil {
-		slog.Error("audit log failed", "job_id", jobID, "agent", agent, "error", auditErr)
+		slog.Error("audit log failed", "job_id", jobID, "session_id", sessionID, "agent", agent, "error", auditErr)
 	}
 
-	// Handle agent failure — mark job failed, ACK task
+	// Handle agent failure — mark job FAILED, ACK task.
 	if agentErr != nil {
-		slog.Error("agent failed", "agent", agent, "job_id", jobID, "error", agentErr)
+		slog.Error("agent execution failed", "agent", agent, "job_id", jobID, "session_id", sessionID, "error", agentErr)
 		errMsg := agentErr.Error()
 		if len(errMsg) > 200 {
 			errMsg = errMsg[:200] + "…"
@@ -386,40 +405,35 @@ func (s *Server) handleAgentExec(w http.ResponseWriter, r *http.Request, agent A
 			{Path: "status", Value: StatusFailed},
 			{Path: "final_result", Value: fmt.Sprintf("%s agent failed: %s", agent, errMsg)},
 		}); failErr != nil {
-			slog.Error("agent: failJob error", "agent", agent, "error", failErr)
+			slog.Error("CRITICAL: failed to mark job as FAILED after agent error, job stuck IN_PROGRESS — manual intervention required",
+				"agent", agent, "job_id", jobID, "session_id", sessionID,
+				"store_error", failErr, "agent_error", agentErr)
 		}
-		w.WriteHeader(http.StatusOK) // ACK — agent failure is permanent
-		return
-	}
-
-	// Re-read job to check if agent set a terminal state (e.g., COMPLETED, HITL)
-	job, err = s.store.GetJob(ctx, jobID, sessionID)
-	if err != nil {
-		slog.Error("agent: re-read job failed", "agent", agent, "error", err)
-		http.Error(w, "re-read job failed", http.StatusInternalServerError)
-		return
-	}
-	if job.Status == StatusCompleted || job.Status == StatusFailed || job.Status == StatusHITL {
-		slog.Info("agent: terminal state", "agent", agent, "job_id", jobID, "status", job.Status)
 		w.WriteHeader(http.StatusOK)
 		return
 	}
 
-	// Callback: enqueue orchestrator for next routing decision.
-	// First transition job to QUEUED+orchestrator so that if the enqueue fails,
-	// a future resume/retry mechanism can discover the stranded job and re-enqueue.
+	// Agent succeeded — enqueue orchestrator for next routing decision.
+	//
+	// Agents MUST NOT set terminal states (COMPLETED/FAILED/HITL) — only the
+	// orchestrator manages status transitions. The job is IN_PROGRESS here,
+	// so transitioning to QUEUED+orchestrator is always correct.
+	//
+	// Transition first: if the subsequent Enqueue fails, a recovery sweep
+	// can discover the job by its QUEUED+orchestrator state.
 	if err := s.store.UpdateJob(ctx, jobID, sessionID, []firestore.Update{
 		{Path: "status", Value: StatusQueued},
 		{Path: "active_agent", Value: AgentOrchestrator},
 	}); err != nil {
-		slog.Error("agent: callback-pending transition failed", "agent", agent, "error", err)
-		// Job stuck IN_PROGRESS — recoverable by future sweep. ACK the task.
+		slog.Error("CRITICAL: callback transition failed after successful agent execution, job stuck IN_PROGRESS — manual intervention required",
+			"agent", agent, "job_id", jobID, "session_id", sessionID, "error", err)
 		w.WriteHeader(http.StatusOK)
 		return
 	}
-	// ACK the task regardless — the agent already succeeded and wrote to Firestore.
+
 	if err := s.dispatcher.Enqueue(ctx, s.selfURL+"/internal/route", jobID, sessionID); err != nil {
-		slog.Error("agent: enqueue callback failed (job is QUEUED, recoverable)", "agent", agent, "error", err)
+		slog.Error("CRITICAL: enqueue callback failed, job is QUEUED+orchestrator but no Cloud Task scheduled — manual re-enqueue or sweep required",
+			"agent", agent, "job_id", jobID, "session_id", sessionID, "error", err)
 	}
 
 	w.WriteHeader(http.StatusOK)
