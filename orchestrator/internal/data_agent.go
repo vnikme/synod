@@ -210,8 +210,14 @@ func (a *DataAgent) Execute(ctx context.Context, job *Job, instructions string, 
 		wg.Add(1)
 		go func(i int, query string) {
 			defer wg.Done()
-			sem <- struct{}{}
-			defer func() { <-sem }()
+
+			select {
+			case sem <- struct{}{}:
+				defer func() { <-sem }()
+			case <-ctx.Done():
+				results[i] = queryResult{failed: true, query: query}
+				return
+			}
 
 			var chunks []string
 			found := false

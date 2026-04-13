@@ -150,26 +150,30 @@ def execute_code(code: str, timeout: int = 120) -> dict:
     queue = _mp_ctx.Queue()
     proc = _mp_ctx.Process(target=_run_in_process, args=(code, queue))
     proc.start()
-    proc.join(timeout)
-
-    if proc.is_alive():
-        proc.terminate()
-        proc.join(2)
-        if proc.is_alive():
-            proc.kill()
-        return {
-            "success": False,
-            "stdout": "",
-            "error": f"Execution timed out after {timeout}s",
-            "charts": [],
-        }
-
     try:
-        return queue.get(timeout=5)
-    except Exception:
-        return {
-            "success": False,
-            "stdout": "",
-            "error": "Execution produced no result (process may have crashed)",
-            "charts": [],
-        }
+        proc.join(timeout)
+
+        if proc.is_alive():
+            proc.terminate()
+            proc.join(2)
+            if proc.is_alive():
+                proc.kill()
+            return {
+                "success": False,
+                "stdout": "",
+                "error": f"Execution timed out after {timeout}s",
+                "charts": [],
+            }
+
+        try:
+            return queue.get(timeout=5)
+        except Exception:
+            return {
+                "success": False,
+                "stdout": "",
+                "error": "Execution produced no result (process may have crashed)",
+                "charts": [],
+            }
+    finally:
+        queue.close()
+        queue.join_thread()
