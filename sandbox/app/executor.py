@@ -8,6 +8,12 @@ import multiprocessing
 import traceback
 from contextlib import redirect_stdout
 
+# Use "spawn" instead of the default "fork". Uvicorn runs sync endpoints in a
+# thread pool, so forking would copy orphaned lock state (logging, import locks,
+# etc.) into the child process, causing deadlocks that hang until the timeout
+# kills the process — preventing charts from ever being produced.
+_mp_ctx = multiprocessing.get_context("spawn")
+
 ALLOWED_MODULES = frozenset({
     "pandas", "numpy", "matplotlib", "matplotlib.pyplot",
     "math", "statistics", "collections", "itertools",
@@ -70,19 +76,15 @@ def _restricted_import(name, globals=None, locals=None, fromlist=(), level=0):
     restricted to the same allowlist enforced by ``CodeValidator``.
 
     Allowed third-party libraries are pre-imported before this hook is exposed
-    to user code, so subsequent imports of allowed modules can resolve from
-    ``sys.modules`` cache. Cached modules must still satisfy the same blocked
-    and allowed-root checks as uncached imports.
+    to user code, but the actual import result is still delegated to Python's
+    ``__import__`` so standard import semantics are preserved for cached and
+    uncached modules alike.
     """
-    import sys as _sys
     root = name.split(".")[0]
     if root in BLOCKED_MODULES:
         raise ImportError(f"Import of '{name}' is blocked for security")
     if root not in ALLOWED_ROOTS:
         raise ImportError(f"Import of '{name}' is not allowed")
-    # Return cached modules when their root is explicitly allowed.
-    if name in _sys.modules:
-        return _sys.modules[name]
     return builtins.__import__(name, globals, locals, fromlist, level)
 
 
@@ -145,29 +147,33 @@ def execute_code(code: str, timeout: int = 120) -> dict:
             "charts": [],
         }
 
-    queue = multiprocessing.Queue()
-    proc = multiprocessing.Process(target=_run_in_process, args=(code, queue))
+    queue = _mp_ctx.Queue()
+    proc = _mp_ctx.Process(target=_run_in_process, args=(code, queue))
     proc.start()
-    proc.join(timeout)
-
-    if proc.is_alive():
-        proc.terminate()
-        proc.join(2)
-        if proc.is_alive():
-            proc.kill()
-        return {
-            "success": False,
-            "stdout": "",
-            "error": f"Execution timed out after {timeout}s",
-            "charts": [],
-        }
-
     try:
-        return queue.get(timeout=5)
-    except Exception:
-        return {
-            "success": False,
-            "stdout": "",
-            "error": "Execution produced no result (process may have crashed)",
-            "charts": [],
-        }
+        proc.join(timeout)
+
+        if proc.is_alive():
+            proc.terminate()
+            proc.join(2)
+            if proc.is_alive():
+                proc.kill()
+            return {
+                "success": False,
+                "stdout": "",
+                "error": f"Execution timed out after {timeout}s",
+                "charts": [],
+            }
+
+        try:
+            return queue.get(timeout=5)
+        except Exception:
+            return {
+                "success": False,
+                "stdout": "",
+                "error": "Execution produced no result (process may have crashed)",
+                "charts": [],
+            }
+    finally:
+        queue.close()
+        queue.join_thread()

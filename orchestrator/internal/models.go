@@ -1,14 +1,21 @@
 package internal
 
-import "time"
+import (
+	"time"
+	"unicode/utf8"
+)
 
 // truncateRunes truncates s to at most maxRunes runes, appending "…" if truncated.
 func truncateRunes(s string, maxRunes int) string {
-	runes := []rune(s)
-	if len(runes) <= maxRunes {
+	byteIdx := 0
+	for i := 0; i < maxRunes && byteIdx < len(s); i++ {
+		_, size := utf8.DecodeRuneInString(s[byteIdx:])
+		byteIdx += size
+	}
+	if byteIdx >= len(s) {
 		return s
 	}
-	return string(runes[:maxRunes]) + "…"
+	return s[:byteIdx] + "…"
 }
 
 // --- Enumerations ---

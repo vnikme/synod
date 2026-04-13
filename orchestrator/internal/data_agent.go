@@ -193,36 +193,74 @@ func (a *DataAgent) Execute(ctx context.Context, job *Job, instructions string, 
 		}
 	}
 
+	// Fetch all queries concurrently.
+	type queryResult struct {
+		chunks []string
+		usage  TokenUsage
+		failed bool
+		query  string
+	}
+
+	const maxConcurrent = 5
+	sem := make(chan struct{}, maxConcurrent)
+	results := make([]queryResult, len(queries))
+	var wg sync.WaitGroup
+
+	for i, query := range queries {
+		wg.Add(1)
+		go func(i int, query string) {
+			defer wg.Done()
+
+			select {
+			case sem <- struct{}{}:
+				defer func() { <-sem }()
+			case <-ctx.Done():
+				results[i] = queryResult{failed: true, query: query}
+				return
+			}
+
+			var chunks []string
+			found := false
+
+			// Try SEC EDGAR if the query mentions a known company
+			if cik := a.cikCache.lookup(query); cik != "" {
+				data, err := a.fetchEDGAR(ctx, cik, query)
+				if err != nil {
+					slog.Warn("EDGAR fetch failed", "query", query, "error", err)
+				} else {
+					chunks = append(chunks, fmt.Sprintf("[SEC EDGAR] %s:\n%s", query, data))
+					found = true
+				}
+			}
+
+			// Web search for broader context (via Gemini Google Search grounding)
+			searchResults, searchUsage, err := a.searchWeb(ctx, query)
+			if err != nil {
+				slog.Warn("web search failed", "query", query, "error", err)
+			} else if searchResults != "" {
+				chunks = append(chunks, fmt.Sprintf("[Web Search] '%s':\n%s", query, searchResults))
+				found = true
+			}
+
+			results[i] = queryResult{
+				chunks: chunks,
+				usage:  searchUsage,
+				failed: !found,
+				query:  query,
+			}
+		}(i, query)
+	}
+	wg.Wait()
+
+	// Collect results in original query order.
 	var rawChunks []string
 	var failedQueries []string
 	var totalUsage TokenUsage
-
-	for _, query := range queries {
-		found := false
-
-		// Try SEC EDGAR if the query mentions a known company
-		if cik := a.cikCache.lookup(query); cik != "" {
-			data, err := a.fetchEDGAR(ctx, cik, query)
-			if err != nil {
-				slog.Warn("EDGAR fetch failed", "query", query, "error", err)
-			} else {
-				rawChunks = append(rawChunks, fmt.Sprintf("[SEC EDGAR] %s:\n%s", query, data))
-				found = true
-			}
-		}
-
-		// Web search for broader context (via Gemini Google Search grounding)
-		results, searchUsage, err := a.searchWeb(ctx, query)
-		totalUsage = totalUsage.Add(searchUsage)
-		if err != nil {
-			slog.Warn("web search failed", "query", query, "error", err)
-		} else if results != "" {
-			rawChunks = append(rawChunks, fmt.Sprintf("[Web Search] '%s':\n%s", query, results))
-			found = true
-		}
-
-		if !found {
-			failedQueries = append(failedQueries, query)
+	for _, r := range results {
+		rawChunks = append(rawChunks, r.chunks...)
+		totalUsage = totalUsage.Add(r.usage)
+		if r.failed {
+			failedQueries = append(failedQueries, r.query)
 		}
 	}
 
