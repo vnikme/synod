@@ -6,7 +6,6 @@ from pydantic import BaseModel, Field
 
 from app.executor import execute_code
 
-logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("sandbox")
 
 # Pre-warm matplotlib font cache at startup so child processes don't

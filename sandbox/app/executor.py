@@ -23,10 +23,17 @@ from contextlib import redirect_stdout
 # "forkserver" is both safe and fast: a dedicated server process (no threads)
 # is started once and pre-imports the heavy libraries. Each child is forked
 # from this clean server, inheriting the loaded modules instantly.
-_mp_ctx = multiprocessing.get_context("forkserver")
-_mp_ctx.set_forkserver_preload([
-    "matplotlib", "matplotlib.pyplot", "pandas", "numpy",
-])
+#
+# Do not preload matplotlib.pyplot: _run_in_process must set the Agg backend
+# via MPLBACKEND (inherited from Dockerfile env) before pyplot is imported.
+# Preloading pyplot would lock in backend selection too early.
+if "forkserver" in multiprocessing.get_all_start_methods():
+    _mp_ctx = multiprocessing.get_context("forkserver")
+    _mp_ctx.set_forkserver_preload(["matplotlib", "pandas", "numpy"])
+else:
+    # Fallback for platforms without forkserver (Windows). Imports will be
+    # slower but correct.
+    _mp_ctx = multiprocessing.get_context("spawn")
 
 ALLOWED_MODULES = frozenset({
     "pandas", "numpy", "matplotlib", "matplotlib.pyplot",
@@ -119,63 +126,79 @@ def _restricted_import(name, globals=None, locals=None, fromlist=(), level=0):
 
 def _run_in_process(code: str, result_queue: multiprocessing.Queue):
     """Execute code in a restricted namespace within a child process."""
-    import sys
+    import sys as _sys  # always available; not exposed to user code
+
     timings: dict[str, float] = {}
 
-    # Write directly to stderr so the parent can see progress even if the
-    # child is killed by the timeout before it puts results on the queue.
-    t0 = time.monotonic()
-    print("[sandbox-child] starting imports", file=sys.stderr, flush=True)
-    import matplotlib
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
-    import pandas  # noqa: F401
-    import numpy  # noqa: F401
-    timings["imports_s"] = round(time.monotonic() - t0, 3)
-    print(f"[sandbox-child] imports done in {timings['imports_s']}s", file=sys.stderr, flush=True)
-
-    stdout_buf = io.StringIO()
-    charts: list[str] = []
-    error: str | None = None
-
     try:
-        safe_builtins = {
-            k: v for k, v in vars(builtins).items()
-            if k not in ("exec", "eval", "compile", "open", "breakpoint", "exit", "quit", "input")
-        }
-        safe_builtins["__import__"] = _restricted_import
+        # Write directly to stderr so the parent can see progress even if the
+        # child is killed by the timeout before it puts results on the queue.
+        t0 = time.monotonic()
+        print("[sandbox-child] starting imports", file=_sys.stderr, flush=True)
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+        import pandas  # noqa: F401
+        import numpy  # noqa: F401
+        timings["imports_s"] = round(time.monotonic() - t0, 3)
+        print(f"[sandbox-child] imports done in {timings['imports_s']}s", file=_sys.stderr, flush=True)
 
-        namespace = {"__builtins__": safe_builtins}
+        stdout_buf = io.StringIO()
+        charts: list[str] = []
+        error: str | None = None
 
-        t1 = time.monotonic()
-        with redirect_stdout(stdout_buf):
-            exec(code, namespace)  # noqa: S102
-        timings["exec_s"] = round(time.monotonic() - t1, 3)
+        try:
+            safe_builtins = {
+                k: v for k, v in vars(builtins).items()
+                if k not in ("exec", "eval", "compile", "open", "breakpoint", "exit", "quit", "input")
+            }
+            safe_builtins["__import__"] = _restricted_import
 
-        # Capture all matplotlib figures
-        t2 = time.monotonic()
-        for fig_num in plt.get_fignums():
-            fig = plt.figure(fig_num)
-            buf = io.BytesIO()
-            fig.savefig(buf, format="png", bbox_inches="tight", dpi=150)
-            buf.seek(0)
-            charts.append(base64.b64encode(buf.read()).decode())
-        plt.close("all")
-        timings["charts_s"] = round(time.monotonic() - t2, 3)
+            namespace = {"__builtins__": safe_builtins}
+
+            t1 = time.monotonic()
+            with redirect_stdout(stdout_buf):
+                exec(code, namespace)  # noqa: S102
+            timings["exec_s"] = round(time.monotonic() - t1, 3)
+
+            # Capture all matplotlib figures
+            t2 = time.monotonic()
+            for fig_num in plt.get_fignums():
+                fig = plt.figure(fig_num)
+                buf = io.BytesIO()
+                fig.savefig(buf, format="png", bbox_inches="tight", dpi=150)
+                buf.seek(0)
+                charts.append(base64.b64encode(buf.read()).decode())
+            plt.close("all")
+            timings["charts_s"] = round(time.monotonic() - t2, 3)
+
+        except Exception:
+            error = traceback.format_exc()
+            timings["exec_s"] = timings.get("exec_s", round(time.monotonic() - t0 - timings.get("imports_s", 0), 3))
+
+        t3 = time.monotonic()
+        result_queue.put({
+            "success": error is None,
+            "stdout": stdout_buf.getvalue(),
+            "error": error or "",
+            "charts": charts,
+            "timings": timings,
+        })
+        timings["queue_put_s"] = round(time.monotonic() - t3, 3)
 
     except Exception:
-        error = traceback.format_exc()
-        timings["exec_s"] = timings.get("exec_s", round(time.monotonic() - t0 - timings.get("imports_s", 0), 3))
-
-    t3 = time.monotonic()
-    result_queue.put({
-        "success": error is None,
-        "stdout": stdout_buf.getvalue(),
-        "error": error or "",
-        "charts": charts,
-        "timings": timings,
-    })
-    timings["queue_put_s"] = round(time.monotonic() - t3, 3)
+        # Top-level catch: import failures or unexpected crashes. Always send
+        # an error payload so the parent doesn't get the generic "no result".
+        try:
+            result_queue.put({
+                "success": False,
+                "stdout": "",
+                "error": traceback.format_exc(),
+                "charts": [],
+                "timings": timings,
+            })
+        except Exception:
+            pass  # queue itself is broken; parent will handle via timeout
 
 
 def execute_code(code: str, timeout: int = 60) -> dict:
@@ -215,7 +238,10 @@ def execute_code(code: str, timeout: int = 60) -> dict:
             return {
                 "success": False,
                 "stdout": "",
-                "error": f"Execution timed out after {timeout}s. Check child stderr for phase (imports vs exec).",
+                "error": (
+                    f"Execution timed out after {timeout}s. "
+                    "See sandbox service logs for phase (imports vs exec)."
+                ),
                 "charts": [],
                 "timings": timings,
             }
