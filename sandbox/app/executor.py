@@ -63,15 +63,16 @@ def validate_code(code: str) -> list[str]:
 
 
 def _restricted_import(name, globals=None, locals=None, fromlist=(), level=0):
-    """Import hook enforcing the allowlist at runtime."""
+    """Import hook: block dangerous modules, allow everything else.
+
+    The AST validator already restricts user-level imports to the allowlist.
+    At runtime we only need to block truly dangerous modules because allowed
+    libraries (pandas, numpy, matplotlib) internally import many stdlib
+    modules (time, struct, functools …) that are harmless.
+    """
     root = name.split(".")[0]
     if root in BLOCKED_MODULES:
         raise ImportError(f"Import of '{name}' is blocked for security")
-    if root not in ALLOWED_ROOTS:
-        raise ImportError(
-            f"Import of '{name}' is not allowed. "
-            f"Allowed: {', '.join(sorted(ALLOWED_MODULES))}"
-        )
     return builtins.__import__(name, globals, locals, fromlist, level)
 
 
