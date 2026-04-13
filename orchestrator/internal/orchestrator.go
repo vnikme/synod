@@ -74,7 +74,8 @@ Rules:
 - "queries" is required when next_agent is "data"; omit otherwise.
 - Be specific in "instructions" — tell the agent exactly what data to find or what to compute.
 - For financial requests, include company names/tickers in queries for SEC EDGAR lookup.
-- When the user has clarified their intent in chat_history, use the clarified intent for queries and instructions.`
+- When the user has clarified their intent in chat_history, use the clarified intent for queries and instructions.
+- If collected_facts contains a "data_unavailable" entry, do NOT route to "data" again for the same topic. Instead, route to "report" to summarize what is known, or "ask_user" to explain the data limitation.`
 
 type RoutingDecision struct {
 	NextAgent    string   `json:"next_agent"`

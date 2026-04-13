@@ -199,8 +199,11 @@ func (a *DataAgent) Execute(ctx context.Context, job *Job, instructions string, 
 	}
 
 	var rawChunks []string
+	var failedQueries []string
 
 	for _, query := range queries {
+		found := false
+
 		// Try SEC EDGAR if the query mentions a known company
 		if cik := a.cikCache.lookup(query); cik != "" {
 			data, err := a.fetchEDGAR(ctx, cik, query)
@@ -208,6 +211,7 @@ func (a *DataAgent) Execute(ctx context.Context, job *Job, instructions string, 
 				slog.Warn("EDGAR fetch failed", "query", query, "error", err)
 			} else {
 				rawChunks = append(rawChunks, fmt.Sprintf("[SEC EDGAR] %s:\n%s", query, data))
+				found = true
 			}
 		}
 
@@ -215,16 +219,29 @@ func (a *DataAgent) Execute(ctx context.Context, job *Job, instructions string, 
 		results, err := a.searchWeb(ctx, query)
 		if err != nil {
 			slog.Warn("web search failed", "query", query, "error", err)
-			continue
-		}
-		if results != "" {
+		} else if results != "" {
 			rawChunks = append(rawChunks, fmt.Sprintf("[Web Search] '%s':\n%s", query, results))
+			found = true
+		}
+
+		if !found {
+			failedQueries = append(failedQueries, query)
 		}
 	}
 
 	if len(rawChunks) == 0 {
 		slog.Warn("data agent: no data collected", "job_id", job.JobID)
-		return TokenUsage{}, fmt.Errorf("no data collected for queries: %v", queries)
+		// Record that no data was found so the orchestrator doesn't loop.
+		noDataFact := Fact{
+			Key:    "data_unavailable",
+			Value:  fmt.Sprintf("No data could be retrieved for: %s. Web search and SEC EDGAR returned no results.", strings.Join(queries, ", ")),
+			Source: "data_agent",
+		}
+		allFacts := append(job.CollectedFacts, noDataFact)
+		return TokenUsage{}, a.store.UpdateJob(ctx, job.JobID, job.SessionID, []firestore.Update{
+			{Path: "collected_facts", Value: allFacts},
+			{Path: "missing_queries", Value: []string{}},
+		})
 	}
 
 	// LLM-extract structured facts from raw data
@@ -238,6 +255,16 @@ func (a *DataAgent) Execute(ctx context.Context, job *Job, instructions string, 
 	usage, err := a.gemini.GenerateJSON(ctx, factExtractionPrompt, prompt, &facts)
 	if err != nil {
 		return usage, fmt.Errorf("fact extraction: %w", err)
+	}
+
+	// If LLM extracted 0 new facts, record that explicitly so the orchestrator
+	// knows data collection yielded nothing and doesn't loop.
+	if len(facts) == 0 && len(failedQueries) > 0 {
+		facts = append(facts, Fact{
+			Key:    "data_unavailable",
+			Value:  fmt.Sprintf("Could not find relevant data for: %s", strings.Join(failedQueries, ", ")),
+			Source: "data_agent",
+		})
 	}
 
 	allFacts := append(job.CollectedFacts, facts...)
