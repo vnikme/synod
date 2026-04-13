@@ -2,6 +2,7 @@ package internal
 
 import (
 	"context"
+	"time"
 
 	"cloud.google.com/go/firestore"
 )
@@ -18,6 +19,8 @@ type JobStore interface {
 	ClaimQueuedJob(ctx context.Context, jobID, sessionID string, agent AgentType) (*Job, error)
 	ResumeHITLJob(ctx context.Context, jobID, sessionID string) (*Job, ResumeResult, error)
 	AppendAuditLog(ctx context.Context, jobID, sessionID string, entry AuditEntry) error
+	FindStaleJobs(ctx context.Context, status JobStatus, olderThan time.Time) ([]*Job, error)
+	RecoverStaleJob(ctx context.Context, jobID, sessionID string) (bool, error)
 }
 
 // TaskDispatcher abstracts the async task queue for enqueuing Cloud Tasks.

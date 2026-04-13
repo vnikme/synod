@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
+	"time"
 
 	"cloud.google.com/go/firestore"
 	"github.com/google/uuid"
@@ -380,8 +381,15 @@ func (s *Server) handleAgentExec(w http.ResponseWriter, r *http.Request, agent A
 	// with CRITICAL-level logging for operator alerting.
 	// ---------------------------------------------------------------
 
+	// Per-agent timeout — defense-in-depth against hung HTTP calls or
+	// LLM API stalls. Cloud Tasks has its own timeout, but this catches
+	// hangs earlier with a clear error message.
+	agentTimeout := agentExecTimeout(agent)
+	agentCtx, agentCancel := context.WithTimeout(ctx, agentTimeout)
+	defer agentCancel()
+
 	// Execute the agent
-	usage, agentErr := run(ctx, job)
+	usage, agentErr := run(agentCtx, job)
 
 	// Audit
 	detail := "success"
@@ -437,6 +445,23 @@ func (s *Server) handleAgentExec(w http.ResponseWriter, r *http.Request, agent A
 	}
 
 	w.WriteHeader(http.StatusOK)
+}
+
+// agentExecTimeout returns the maximum execution time for each agent type.
+// These are defense-in-depth against hung HTTP calls or LLM API stalls.
+// The sandbox itself has a 120s code execution timeout, and the analyst
+// retries up to 3 times, so it needs the longest budget.
+func agentExecTimeout(agent AgentType) time.Duration {
+	switch agent {
+	case AgentData:
+		return 2 * time.Minute // Multiple concurrent HTTP calls + LLM extraction
+	case AgentAnalyst:
+		return 4 * time.Minute // Sandbox calls with up to 3 retries + LLM code gen
+	case AgentReport:
+		return 90 * time.Second // Single LLM call
+	default:
+		return 3 * time.Minute
+	}
 }
 
 func (s *Server) handleAgentData(w http.ResponseWriter, r *http.Request) {

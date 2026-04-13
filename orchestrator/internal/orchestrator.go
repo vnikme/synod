@@ -168,6 +168,11 @@ func (o *OrchestratorAgent) Execute(ctx context.Context, jobID, sessionID string
 		}
 		return o.failJob(ctx, job, detail)
 	}
+
+	// Programmatic guardrails — catch LLM routing errors that the prompt
+	// rules can't guarantee. Overrides are logged so we can tune the prompt.
+	decision = validateDecision(decision, job)
+
 	if err := o.store.AppendAuditLog(ctx, jobID, sessionID, AuditEntry{
 		Agent:  AgentOrchestrator,
 		Action: "route",
@@ -183,9 +188,6 @@ func (o *OrchestratorAgent) Execute(ctx context.Context, jobID, sessionID string
 	// Dispatch to chosen agent via Cloud Tasks (async)
 	switch decision.NextAgent {
 	case "data":
-		if len(decision.Queries) == 0 {
-			return o.failJob(ctx, job, "routing decided 'data' but provided no queries")
-		}
 		if err := o.store.UpdateJob(ctx, jobID, sessionID, []firestore.Update{
 			{Path: "status", Value: StatusQueued},
 			{Path: "active_agent", Value: AgentData},
@@ -243,6 +245,19 @@ func (o *OrchestratorAgent) Execute(ctx context.Context, jobID, sessionID string
 
 	case "complete":
 		slog.Info("orchestrator: marking job complete", "job_id", jobID)
+		// Append the final report to chat history so future sessions in this
+		// thread have the full conversation context. This is done here (not in
+		// the report agent) so that only the accepted final report is appended,
+		// not intermediate drafts that the orchestrator may have sent back for
+		// revision.
+		if job.FinalResult != "" {
+			if err := o.store.AppendChatHistory(ctx, sessionID, ChatMessage{
+				Role: "assistant", Content: job.FinalResult,
+			}); err != nil {
+				slog.Error("orchestrator: failed to append final report to chat history",
+					"job_id", jobID, "session_id", sessionID, "error", err)
+			}
+		}
 		return o.store.UpdateJob(ctx, jobID, sessionID, []firestore.Update{
 			{Path: "status", Value: StatusCompleted},
 			{Path: "active_agent", Value: AgentOrchestrator},
@@ -253,18 +268,82 @@ func (o *OrchestratorAgent) Execute(ctx context.Context, jobID, sessionID string
 	}
 }
 
+// validateDecision applies programmatic guardrails to catch LLM routing errors
+// that prompt rules can't guarantee. Returns a potentially modified decision.
+//
+// Rules:
+//   - "data" MUST have queries; fallback to ask_user.
+//   - "analyst" with no collected facts → redirect to "data" (except pure-computation prompts,
+//     which the LLM handles; we can't detect that here, so we only guard the empty-facts case).
+//   - "complete" with empty final_result → redirect to "report".
+//   - "report" with no facts AND no assets → redirect to "ask_user".
+func validateDecision(d *RoutingDecision, job *Job) *RoutingDecision {
+	hasFacts := len(job.CollectedFacts) > 0
+	hasAssets := len(job.GeneratedAssets) > 0
+	hasReport := job.FinalResult != ""
+
+	switch d.NextAgent {
+	case "data":
+		if len(d.Queries) == 0 {
+			slog.Warn("routing guardrail: LLM chose 'data' without queries — overriding to ask_user",
+				"job_id", job.JobID, "reasoning", d.Reasoning)
+			return &RoutingDecision{
+				NextAgent:    "ask_user",
+				Reasoning:    fmt.Sprintf("guardrail override: LLM chose 'data' without queries (original: %s)", d.Reasoning),
+				Instructions: "I need more details to search for the right information. Could you clarify what specific data you'd like me to find?",
+			}
+		}
+
+	case "analyst":
+		if !hasFacts && !hasAssets {
+			slog.Warn("routing guardrail: LLM chose 'analyst' but no facts or assets exist — overriding to data",
+				"job_id", job.JobID, "reasoning", d.Reasoning)
+			return &RoutingDecision{
+				NextAgent:    "data",
+				Reasoning:    fmt.Sprintf("guardrail override: analyst needs data first (original: %s)", d.Reasoning),
+				Instructions: d.Instructions,
+				Queries:      []string{job.Prompt}, // Use the original prompt as a search query
+			}
+		}
+
+	case "report":
+		if !hasFacts && !hasAssets {
+			slog.Warn("routing guardrail: LLM chose 'report' but no facts or assets exist — overriding to ask_user",
+				"job_id", job.JobID, "reasoning", d.Reasoning)
+			return &RoutingDecision{
+				NextAgent:    "ask_user",
+				Reasoning:    fmt.Sprintf("guardrail override: report has no content to synthesize (original: %s)", d.Reasoning),
+				Instructions: "I don't have enough information yet to write a report. Could you provide more context or clarify your request?",
+			}
+		}
+
+	case "complete":
+		if !hasReport {
+			slog.Warn("routing guardrail: LLM chose 'complete' but final_result is empty — overriding to report",
+				"job_id", job.JobID, "reasoning", d.Reasoning)
+			return &RoutingDecision{
+				NextAgent:    "report",
+				Reasoning:    fmt.Sprintf("guardrail override: cannot complete without a report (original: %s)", d.Reasoning),
+				Instructions: "Synthesize all collected facts and analysis into a comprehensive report.",
+			}
+		}
+	}
+
+	return d // no override needed
+}
+
 func (o *OrchestratorAgent) decide(ctx context.Context, job *Job, session *Session) (*RoutingDecision, TokenUsage, error) {
 	state := map[string]any{
 		"prompt":             job.Prompt,
 		"status":             job.Status,
-		"collected_facts":    job.CollectedFacts,
+		"collected_facts":    compactFacts(job.CollectedFacts),
 		"generated_assets":   assetSummaries(job.GeneratedAssets),
 		"missing_queries":    job.MissingQueries,
-		"final_result":       job.FinalResult,
+		"final_result":       truncateRunes(job.FinalResult, 2000),
 		"last_agent_summary": job.LastAgentSummary,
 	}
 	if session != nil && len(session.ChatHistory) > 0 {
-		state["chat_history"] = session.ChatHistory
+		state["chat_history"] = compactChatHistory(session.ChatHistory)
 	}
 	stateJSON, err := json.MarshalIndent(state, "", "  ")
 	if err != nil {
@@ -301,6 +380,63 @@ func (o *OrchestratorAgent) revertDispatch(ctx context.Context, jobID, sessionID
 			"job_id", jobID, "agent", agent,
 			"enqueue_error", enqueueErr, "revert_error", revertErr)
 	}
+}
+
+const (
+	maxFactsForLLM       = 40  // Cap facts sent to orchestrator LLM
+	maxFactValueRunes    = 300 // Truncate individual fact values
+	maxChatHistoryForLLM = 20  // Keep last N messages for routing context
+)
+
+// compactFacts deduplicates and truncates facts before sending to the LLM.
+// The full facts array is preserved in Firestore; this only affects the
+// routing decision context.
+func compactFacts(facts []Fact) []Fact {
+	if len(facts) == 0 {
+		return facts
+	}
+
+	// Deduplicate by key (keep last occurrence — most recent data wins)
+	seen := make(map[string]int, len(facts))
+	deduped := make([]Fact, 0, len(facts))
+	for _, f := range facts {
+		if idx, ok := seen[f.Key]; ok {
+			deduped[idx] = f // overwrite earlier occurrence
+		} else {
+			seen[f.Key] = len(deduped)
+			deduped = append(deduped, f)
+		}
+	}
+
+	// Cap total count
+	if len(deduped) > maxFactsForLLM {
+		deduped = deduped[len(deduped)-maxFactsForLLM:]
+	}
+
+	// Truncate individual values
+	out := make([]Fact, len(deduped))
+	for i, f := range deduped {
+		out[i] = Fact{
+			Key:    f.Key,
+			Value:  truncateRunes(f.Value, maxFactValueRunes),
+			Source: f.Source,
+		}
+	}
+	return out
+}
+
+// compactChatHistory keeps only the most recent messages for routing context.
+// Always preserves the first message (original user prompt) when truncating.
+func compactChatHistory(history []ChatMessage) []ChatMessage {
+	if len(history) <= maxChatHistoryForLLM {
+		return history
+	}
+	// Keep first message + last (maxChatHistoryForLLM - 1) messages
+	compact := make([]ChatMessage, 0, maxChatHistoryForLLM)
+	compact = append(compact, history[0])
+	tail := history[len(history)-(maxChatHistoryForLLM-1):]
+	compact = append(compact, tail...)
+	return compact
 }
 
 func assetSummaries(assets []Asset) []map[string]string {

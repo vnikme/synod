@@ -593,3 +593,26 @@ func TestSPA_InternalPathReturns404(t *testing.T) {
 		t.Errorf("status = %d, want %d", w.Code, http.StatusNotFound)
 	}
 }
+
+// --- Agent Timeout ---
+
+func TestAgentExecTimeout_Durations(t *testing.T) {
+	tests := []struct {
+		agent   AgentType
+		wantMin time.Duration
+		wantMax time.Duration
+	}{
+		{AgentData, 2 * time.Minute, 2 * time.Minute},
+		{AgentAnalyst, 4 * time.Minute, 4 * time.Minute},
+		{AgentReport, 90 * time.Second, 90 * time.Second},
+		{AgentOrchestrator, 3 * time.Minute, 3 * time.Minute}, // default
+	}
+	for _, tt := range tests {
+		t.Run(string(tt.agent), func(t *testing.T) {
+			got := agentExecTimeout(tt.agent)
+			if got < tt.wantMin || got > tt.wantMax {
+				t.Errorf("agentExecTimeout(%s) = %v, want between %v and %v", tt.agent, got, tt.wantMin, tt.wantMax)
+			}
+		})
+	}
+}

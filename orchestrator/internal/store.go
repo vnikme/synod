@@ -3,6 +3,7 @@ package internal
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"time"
 
 	"cloud.google.com/go/firestore"
@@ -278,4 +279,70 @@ func (s *Store) AppendAuditLog(ctx context.Context, jobID, sessionID string, ent
 		}
 		return nil
 	})
+}
+
+// FindStaleJobs queries for jobs in the given status with updated_at before
+// the cutoff time. Used by the recovery sweep to find stuck jobs.
+func (s *Store) FindStaleJobs(ctx context.Context, jobStatus JobStatus, olderThan time.Time) ([]*Job, error) {
+	iter := s.client.Collection("jobs").
+		Where("status", "==", string(jobStatus)).
+		Where("updated_at", "<", olderThan).
+		Limit(50). // Cap per-sweep to avoid Firestore read spikes
+		Documents(ctx)
+	defer iter.Stop()
+
+	var jobs []*Job
+	for {
+		doc, err := iter.Next()
+		if err != nil {
+			// iterator.Done
+			break
+		}
+		var job Job
+		if err := doc.DataTo(&job); err != nil {
+			slog.Error("FindStaleJobs: unmarshal failed", "doc_id", doc.Ref.ID, "error", err)
+			continue
+		}
+		jobs = append(jobs, &job)
+	}
+	return jobs, nil
+}
+
+// RecoverStaleJob atomically transitions a job from IN_PROGRESS to
+// QUEUED+orchestrator via CAS. Returns true if the transition succeeded,
+// false if the job was no longer IN_PROGRESS (already recovered or completed).
+func (s *Store) RecoverStaleJob(ctx context.Context, jobID, sessionID string) (bool, error) {
+	ref := s.client.Collection("jobs").Doc(jobID)
+	var recovered bool
+	err := s.client.RunTransaction(ctx, func(ctx context.Context, tx *firestore.Transaction) error {
+		recovered = false
+		doc, err := tx.Get(ref)
+		if err != nil {
+			if status.Code(err) == codes.NotFound {
+				return nil
+			}
+			return err
+		}
+		var job Job
+		if err := doc.DataTo(&job); err != nil {
+			return err
+		}
+		if job.SessionID != sessionID {
+			return nil
+		}
+		if job.Status != StatusInProgress {
+			return nil // already moved — nothing to do
+		}
+		if err := tx.Update(ref, []firestore.Update{
+			{Path: "status", Value: StatusQueued},
+			{Path: "active_agent", Value: AgentOrchestrator},
+			{Path: "last_agent_summary", Value: "Job recovered by automatic sweep after stale IN_PROGRESS state."},
+			{Path: "updated_at", Value: time.Now()},
+		}); err != nil {
+			return err
+		}
+		recovered = true
+		return nil
+	})
+	return recovered, err
 }

@@ -19,16 +19,18 @@ type mockStore struct {
 	audit    map[string][]AuditEntry
 
 	// Error injection — set any of these to make the corresponding method fail.
-	createSessionErr error
-	getSessionErr    error
-	appendChatErr    error
-	createJobErr     error
-	getJobErr        error
-	updateJobErr     error
-	incrementHopErr  error
-	claimJobErr      error
-	resumeHITLErr    error
-	appendAuditErr   error
+	createSessionErr  error
+	getSessionErr     error
+	appendChatErr     error
+	createJobErr      error
+	getJobErr         error
+	updateJobErr      error
+	incrementHopErr   error
+	claimJobErr       error
+	resumeHITLErr     error
+	appendAuditErr    error
+	findStaleJobsErr  error
+	recoverStaleErr   error
 
 	// Function override — when set, replaces the default UpdateJob logic entirely.
 	// Useful for per-call error injection (e.g., fail on the Nth call).
@@ -236,6 +238,41 @@ func (m *mockStore) AppendAuditLog(_ context.Context, jobID, sessionID string, e
 		job.TokenUsage = job.TokenUsage.Add(entry.Tokens)
 	}
 	return nil
+}
+
+func (m *mockStore) FindStaleJobs(_ context.Context, status JobStatus, olderThan time.Time) ([]*Job, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.findStaleJobsErr != nil {
+		return nil, m.findStaleJobsErr
+	}
+	var result []*Job
+	for _, job := range m.jobs {
+		if job.Status == status && job.UpdatedAt.Before(olderThan) {
+			cp := *job
+			result = append(result, &cp)
+		}
+	}
+	return result, nil
+}
+
+func (m *mockStore) RecoverStaleJob(_ context.Context, jobID, sessionID string) (bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.recoverStaleErr != nil {
+		return false, m.recoverStaleErr
+	}
+	job, ok := m.jobs[jobID]
+	if !ok || job.SessionID != sessionID {
+		return false, nil
+	}
+	if job.Status != StatusInProgress {
+		return false, nil // already moved out of IN_PROGRESS
+	}
+	job.Status = StatusQueued
+	job.ActiveAgent = AgentOrchestrator
+	job.UpdatedAt = time.Now()
+	return true, nil
 }
 
 // --- Mock Dispatcher ---

@@ -78,6 +78,9 @@ func main() {
 	internalAuth := internal.OIDCAuthMiddleware(selfURL, os.Getenv("SERVICE_ACCOUNT_EMAIL"))
 	server := internal.NewServer(orchestrator, dataAgent, analystAgent, reportAgent, store, dispatcher, selfURL, internalAuth, ui.StaticFS)
 
+	// Start background recovery sweep for stuck IN_PROGRESS jobs.
+	internal.StartRecoverySweep(ctx, store, dispatcher, selfURL)
+
 	port := os.Getenv("PORT")
 	if port == "" {
 		port = "8080"
