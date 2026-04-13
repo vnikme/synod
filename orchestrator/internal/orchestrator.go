@@ -90,14 +90,14 @@ type RoutingDecision struct {
 }
 
 type OrchestratorAgent struct {
-	gemini     *GeminiClient
-	store      *Store
-	dispatcher *Dispatcher
+	gemini     LLMClient
+	store      JobStore
+	dispatcher TaskDispatcher
 	selfURL    string
 }
 
 func NewOrchestratorAgent(
-	gemini *GeminiClient, store *Store, dispatcher *Dispatcher,
+	gemini LLMClient, store JobStore, dispatcher TaskDispatcher,
 	selfURL string,
 ) *OrchestratorAgent {
 	return &OrchestratorAgent{

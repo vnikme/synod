@@ -22,8 +22,8 @@ type Server struct {
 	data         *DataAgent
 	analyst      *AnalystAgent
 	report       *ReportAgent
-	store        *Store
-	dispatcher   *Dispatcher
+	store        JobStore
+	dispatcher   TaskDispatcher
 	selfURL      string
 	internalAuth func(http.Handler) http.Handler
 	mux          *http.ServeMux
@@ -33,7 +33,7 @@ type Server struct {
 func NewServer(
 	orchestrator *OrchestratorAgent,
 	data *DataAgent, analyst *AnalystAgent, report *ReportAgent,
-	store *Store, dispatcher *Dispatcher,
+	store JobStore, dispatcher TaskDispatcher,
 	selfURL string, internalAuth func(http.Handler) http.Handler,
 	staticFS fs.FS,
 ) *Server {

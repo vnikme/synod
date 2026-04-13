@@ -19,4 +19,11 @@ deploy-all:
 	bash deploy/gcp/02_deploy.sh
 
 test:
-	cd orchestrator && go vet ./... && go test ./...
+	cd orchestrator && go vet ./... && go test -v ./...
+	cd sandbox && python -m pytest tests/ -v
+
+test-go:
+	cd orchestrator && go vet ./... && go test -v ./...
+
+test-python:
+	cd sandbox && python -m pytest tests/ -v

@@ -35,13 +35,13 @@ Rules:
 Output ONLY the Python code, no markdown fences or explanation.`
 
 type AnalystAgent struct {
-	gemini     *GeminiClient
-	store      *Store
+	gemini     LLMClient
+	store      JobStore
 	sandboxURL string
 	http       *http.Client
 }
 
-func NewAnalystAgent(ctx context.Context, gemini *GeminiClient, store *Store, sandboxURL string) (*AnalystAgent, error) {
+func NewAnalystAgent(ctx context.Context, gemini LLMClient, store JobStore, sandboxURL string) (*AnalystAgent, error) {
 	// Create an HTTP client that automatically adds ID tokens for Cloud Run auth.
 	// Falls back to a plain client if no credentials are available (local dev).
 	httpClient, err := idtoken.NewClient(ctx, sandboxURL)
