@@ -28,6 +28,7 @@ PROJECT_ID="synod-493123"
 REGION="us-central1"
 QUEUE_NAME="synod-tasks"
 SA_EMAIL="synod-orchestrator@${PROJECT_ID}.iam.gserviceaccount.com"
+SANDBOX_SA_EMAIL="synod-sandbox@${PROJECT_ID}.iam.gserviceaccount.com"
 DOMAIN="synod.ai.church"
 REGISTRY="${REGION}-docker.pkg.dev/${PROJECT_ID}/synod"
 
@@ -61,7 +62,7 @@ deploy_sandbox() {
         $SRC \
         --region="$REGION" \
         --project="$PROJECT_ID" \
-        --service-account="$SA_EMAIL" \
+        --service-account="$SANDBOX_SA_EMAIL" \
         --no-allow-unauthenticated \
         --memory=1Gi \
         --cpu=1 \
@@ -81,8 +82,13 @@ deploy_orchestrator() {
         exit 1
     fi
 
-    # Orchestrator base URL: use the custom domain if mapped, else auto-detect
-    ORCHESTRATOR_URL="https://$DOMAIN"
+    # Use the Cloud Run service URL for internal callbacks (Cloud Tasks).
+    # The custom domain is for external clients only and may not be active yet.
+    ORCHESTRATOR_URL=$(get_service_url orchestrator)
+    if [ -z "$ORCHESTRATOR_URL" ]; then
+        # First deploy — will update after service is created.
+        ORCHESTRATOR_URL="https://$DOMAIN"
+    fi
 
     local SRC
     SRC=$(image_or_source orchestrator)
@@ -142,11 +148,17 @@ setup_iam() {
     echo "=== Configuring IAM for internal invocation ==="
     # Orchestrator SA can invoke itself (Cloud Tasks callbacks) and sandbox
     for SVC in orchestrator sandbox; do
-        gcloud run services add-iam-policy-binding "$SVC" \
+        if gcloud run services describe "$SVC" \
             --region="$REGION" \
-            --member="serviceAccount:${SA_EMAIL}" \
-            --role="roles/run.invoker" \
-            --project="$PROJECT_ID" --quiet
+            --project="$PROJECT_ID" >/dev/null 2>&1; then
+            gcloud run services add-iam-policy-binding "$SVC" \
+                --region="$REGION" \
+                --member="serviceAccount:${SA_EMAIL}" \
+                --role="roles/run.invoker" \
+                --project="$PROJECT_ID" --quiet
+        else
+            echo "ℹ️  Skipping IAM binding for $SVC: service not yet deployed."
+        fi
     done
     echo "✅ IAM bindings configured."
 }

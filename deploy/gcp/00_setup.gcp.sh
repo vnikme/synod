@@ -10,6 +10,8 @@ REGION="us-central1"
 QUEUE_NAME="synod-tasks"
 SA_NAME="synod-orchestrator"
 SA_EMAIL="${SA_NAME}@${PROJECT_ID}.iam.gserviceaccount.com"
+SANDBOX_SA_NAME="synod-sandbox"
+SANDBOX_SA_EMAIL="${SANDBOX_SA_NAME}@${PROJECT_ID}.iam.gserviceaccount.com"
 
 echo "=== 1. Setting GCP Project to: ${PROJECT_ID} ==="
 gcloud config set project $PROJECT_ID
@@ -20,6 +22,8 @@ gcloud services enable \
     cloudtasks.googleapis.com \
     firestore.googleapis.com \
     secretmanager.googleapis.com \
+    artifactregistry.googleapis.com \
+    cloudbuild.googleapis.com \
     --project=$PROJECT_ID
 
 echo "=== 3. Initializing Firestore Database (Native Mode) ==="
@@ -34,9 +38,14 @@ gcloud tasks queues create $QUEUE_NAME \
     --location=$REGION \
     --project=$PROJECT_ID || true
 
-echo "=== 5. Creating Dedicated Service Account ==="
+echo "=== 5. Creating Service Accounts ==="
 gcloud iam service-accounts create $SA_NAME \
     --display-name="Synod Orchestrator SA" \
+    --project=$PROJECT_ID || true
+
+# Sandbox SA — intentionally has no extra roles (least privilege).
+gcloud iam service-accounts create $SANDBOX_SA_NAME \
+    --display-name="Synod Sandbox SA" \
     --project=$PROJECT_ID || true
 
 echo "=== 6. Binding IAM Roles to Service Account ==="
