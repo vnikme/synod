@@ -110,6 +110,9 @@ func (m *mockStore) GetJob(_ context.Context, jobID, sessionID string) (*Job, er
 		return nil, nil // session isolation
 	}
 	cp := *job
+	cp.CollectedFacts = append([]Fact{}, job.CollectedFacts...)
+	cp.GeneratedAssets = append([]Asset{}, job.GeneratedAssets...)
+	cp.MissingQueries = append([]string{}, job.MissingQueries...)
 	return &cp, nil
 }
 

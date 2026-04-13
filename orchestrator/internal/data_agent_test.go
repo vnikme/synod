@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -94,19 +95,6 @@ func TestCIKCacheNeedsRefresh(t *testing.T) {
 }
 
 func TestCIKCachePopulate(t *testing.T) {
-	// Mock SEC server
-	secServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Header.Get("User-Agent") == "" {
-			http.Error(w, "missing User-Agent", http.StatusBadRequest)
-			return
-		}
-		json.NewEncoder(w).Encode(map[string]any{
-			"0": map[string]any{"cik_str": 320193, "ticker": "AAPL", "title": "Apple Inc"},
-			"1": map[string]any{"cik_str": 1318605, "ticker": "TSLA", "title": "Tesla Inc"},
-		})
-	}))
-	defer secServer.Close()
-
 	cache := &cikCache{}
 	// We can't easily override the SEC URL, so test the populate logic indirectly.
 	// Instead, test that a populated cache works correctly.
@@ -153,16 +141,13 @@ func TestFetchEDGAR(t *testing.T) {
 	store := newMockStore()
 	gemini := &mockGemini{}
 	agent := NewDataAgent(gemini, store, "test-ua")
-	// Override HTTP client to point at test server
-	agent.http = edgarServer.Client()
+	// Pre-seed CIK cache to avoid real HTTP call to SEC
+	agent.cikCache = &cikCache{
+		byTicker: map[string]string{},
+		byName:   map[string]string{},
+		fetched:  time.Now(),
+	}
 
-	// Build URL with test server
-	// We need to test fetchEDGAR directly, but it builds a hardcoded URL.
-	// Instead, test at a higher level with the data agent.
-	// For unit testing fetchEDGAR, we'd need to make the base URL configurable.
-	// Let's test the data flow instead.
-
-	// Test that the agent handles EDGAR response parsing
 	ctx := context.Background()
 
 	// Seed job
@@ -251,10 +236,10 @@ func TestDataAgent_NoDataCollected(t *testing.T) {
 
 func TestDataAgent_ConcurrentQueries(t *testing.T) {
 	store := newMockStore()
-	queryCount := 0
+	var queryCount atomic.Int32
 	gemini := &mockGemini{}
 	gemini.searchWebFn = func(_ context.Context, query string) ([]SearchResult, string, TokenUsage, error) {
-		queryCount++
+		queryCount.Add(1)
 		return []SearchResult{{Title: query, URL: "https://example.com/" + query}},
 			"Result for: " + query,
 			TokenUsage{TotalTokens: 5}, nil
@@ -287,7 +272,7 @@ func TestDataAgent_ConcurrentQueries(t *testing.T) {
 	}
 
 	// All 3 queries should have been searched
-	if queryCount < 3 {
-		t.Errorf("queryCount = %d, want >= 3 (concurrent queries)", queryCount)
+	if queryCount.Load() < 3 {
+		t.Errorf("queryCount = %d, want >= 3 (concurrent queries)", queryCount.Load())
 	}
 }
