@@ -67,9 +67,10 @@ Respond with JSON:
 }
 
 Rules:
-- If no facts have been collected yet, route to "data" with specific search queries.
+- If no facts have been collected yet AND no analysis has been produced, route to "data" with specific search queries — UNLESS the task is purely computational (e.g., math, code execution) and needs no external data.
 - If facts exist but no analysis/charts have been produced, route to "analyst".
-- If both facts and analysis artifacts exist, route to "report".
+- If the task needs no external data (pure computation, code execution), route directly to "analyst".
+- If generated_assets is non-empty (analysis was already produced), route to "report" to finalize the result. Do NOT route to "analyst" again if it already succeeded.
 - If final_result is already populated, return "complete".
 - If the request is ambiguous or you need clarification, route to "ask_user" and put your question in "instructions".
 - "queries" is required when next_agent is "data"; omit otherwise.
