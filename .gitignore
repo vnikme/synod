@@ -14,3 +14,6 @@ orchestrator/orchestrator
 __pycache__/
 *.pyc
 .venv/
+
+# Secrets
+.env
