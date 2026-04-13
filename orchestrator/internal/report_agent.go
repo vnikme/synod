@@ -27,11 +27,11 @@ Rules:
 - Be comprehensive but concise.`
 
 type ReportAgent struct {
-	gemini *GeminiClient
-	store  *Store
+	gemini LLMClient
+	store  JobStore
 }
 
-func NewReportAgent(gemini *GeminiClient, store *Store) *ReportAgent {
+func NewReportAgent(gemini LLMClient, store JobStore) *ReportAgent {
 	return &ReportAgent{gemini: gemini, store: store}
 }
 

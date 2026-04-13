@@ -166,14 +166,14 @@ Be precise with numbers. Include units and time periods.
 Limit to the most important 15-20 facts.`
 
 type DataAgent struct {
-	gemini   *GeminiClient
-	store    *Store
+	gemini   LLMClient
+	store    JobStore
 	edgarUA  string
 	http     *http.Client
 	cikCache *cikCache
 }
 
-func NewDataAgent(gemini *GeminiClient, store *Store, edgarUA string) *DataAgent {
+func NewDataAgent(gemini LLMClient, store JobStore, edgarUA string) *DataAgent {
 	return &DataAgent{
 		gemini:   gemini,
 		store:    store,
