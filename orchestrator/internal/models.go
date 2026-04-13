@@ -118,10 +118,11 @@ type SandboxRequest struct {
 }
 
 type SandboxResponse struct {
-	Success bool     `json:"success"`
-	Stdout  string   `json:"stdout"`
-	Error   string   `json:"error,omitempty"`
-	Charts  []string `json:"charts"`
+	Success bool               `json:"success"`
+	Stdout  string             `json:"stdout"`
+	Error   string             `json:"error,omitempty"`
+	Charts  []string           `json:"charts"`
+	Timings map[string]float64 `json:"timings,omitempty"`
 }
 
 // --- Token & Audit Tracking ---

@@ -4,7 +4,9 @@ import ast
 import base64
 import builtins
 import io
+import logging
 import multiprocessing
+import time
 import traceback
 from contextlib import redirect_stdout
 
@@ -105,15 +107,15 @@ def _restricted_import(name, globals=None, locals=None, fromlist=(), level=0):
 
 def _run_in_process(code: str, result_queue: multiprocessing.Queue):
     """Execute code in a restricted namespace within a child process."""
+    timings: dict[str, float] = {}
+
+    t0 = time.monotonic()
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
-    # Pre-import heavy allowed libraries before installing the restricted
-    # import hook. This populates sys.modules so subsequent imports by
-    # user code (and internal imports by these libs) hit the cache and
-    # never trigger the restricted hook for os/sys/etc.
     import pandas  # noqa: F401
     import numpy  # noqa: F401
+    timings["imports_s"] = round(time.monotonic() - t0, 3)
 
     stdout_buf = io.StringIO()
     charts: list[str] = []
@@ -128,10 +130,13 @@ def _run_in_process(code: str, result_queue: multiprocessing.Queue):
 
         namespace = {"__builtins__": safe_builtins}
 
+        t1 = time.monotonic()
         with redirect_stdout(stdout_buf):
             exec(code, namespace)  # noqa: S102
+        timings["exec_s"] = round(time.monotonic() - t1, 3)
 
         # Capture all matplotlib figures
+        t2 = time.monotonic()
         for fig_num in plt.get_fignums():
             fig = plt.figure(fig_num)
             buf = io.BytesIO()
@@ -139,20 +144,29 @@ def _run_in_process(code: str, result_queue: multiprocessing.Queue):
             buf.seek(0)
             charts.append(base64.b64encode(buf.read()).decode())
         plt.close("all")
+        timings["charts_s"] = round(time.monotonic() - t2, 3)
 
     except Exception:
         error = traceback.format_exc()
+        timings["exec_s"] = timings.get("exec_s", round(time.monotonic() - t0 - timings.get("imports_s", 0), 3))
 
+    t3 = time.monotonic()
     result_queue.put({
         "success": error is None,
         "stdout": stdout_buf.getvalue(),
         "error": error or "",
         "charts": charts,
+        "timings": timings,
     })
+    timings["queue_put_s"] = round(time.monotonic() - t3, 3)
 
 
 def execute_code(code: str, timeout: int = 120) -> dict:
     """Validate and execute code in a sandboxed subprocess with timeout."""
+    logger = logging.getLogger("sandbox.executor")
+    timings: dict[str, float] = {}
+    wall_start = time.monotonic()
+
     violations = validate_code(code)
     if violations:
         return {
@@ -160,35 +174,62 @@ def execute_code(code: str, timeout: int = 120) -> dict:
             "stdout": "",
             "error": "Code validation failed: " + "; ".join(violations),
             "charts": [],
+            "timings": {},
         }
 
+    t0 = time.monotonic()
     queue = _mp_ctx.Queue()
     proc = _mp_ctx.Process(target=_run_in_process, args=(code, queue))
     proc.start()
+    timings["spawn_s"] = round(time.monotonic() - t0, 3)
+
     try:
+        t1 = time.monotonic()
         proc.join(timeout)
+        timings["join_s"] = round(time.monotonic() - t1, 3)
 
         if proc.is_alive():
             proc.terminate()
             proc.join(2)
             if proc.is_alive():
                 proc.kill()
+            timings["total_s"] = round(time.monotonic() - wall_start, 3)
+            logger.warning("execution timed out", extra={"timings": timings})
             return {
                 "success": False,
                 "stdout": "",
                 "error": f"Execution timed out after {timeout}s",
                 "charts": [],
+                "timings": timings,
             }
 
         try:
-            return queue.get(timeout=5)
+            t2 = time.monotonic()
+            result = queue.get(timeout=5)
+            timings["queue_get_s"] = round(time.monotonic() - t2, 3)
         except Exception:
+            timings["total_s"] = round(time.monotonic() - wall_start, 3)
+            logger.error("no result from subprocess", extra={"timings": timings})
             return {
                 "success": False,
                 "stdout": "",
                 "error": "Execution produced no result (process may have crashed)",
                 "charts": [],
+                "timings": timings,
             }
+
+        # Merge child-process timings into parent timings
+        child_timings = result.pop("timings", {})
+        timings.update({f"child_{k}": v for k, v in child_timings.items()})
+        timings["total_s"] = round(time.monotonic() - wall_start, 3)
+        result["timings"] = timings
+
+        logger.info(
+            "execution complete: success=%s charts=%d",
+            result["success"], len(result.get("charts", [])),
+            extra={"timings": timings},
+        )
+        return result
     finally:
         queue.close()
         queue.join_thread()
