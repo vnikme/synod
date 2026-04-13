@@ -42,18 +42,26 @@ class CodeValidator(ast.NodeVisitor):
         for alias in node.names:
             root = alias.name.split(".")[0]
             if root in BLOCKED_MODULES:
-                self.violations.append(f"Blocked import: {alias.name}")
+                self.violations.append(f"Blocked import: {alias.name} (no network/OS access in sandbox)")
             elif root not in ALLOWED_ROOTS:
-                self.violations.append(f"Disallowed import: {alias.name}")
+                self.violations.append(
+                    f"Disallowed import: {alias.name}. "
+                    f"Allowed: {', '.join(sorted(ALLOWED_MODULES))}. "
+                    f"Embed data as Python literals instead of fetching it."
+                )
         self.generic_visit(node)
 
     def visit_ImportFrom(self, node: ast.ImportFrom):
         if node.module:
             root = node.module.split(".")[0]
             if root in BLOCKED_MODULES:
-                self.violations.append(f"Blocked import from: {node.module}")
+                self.violations.append(f"Blocked import from: {node.module} (no network/OS access in sandbox)")
             elif root not in ALLOWED_ROOTS:
-                self.violations.append(f"Disallowed import from: {node.module}")
+                self.violations.append(
+                    f"Disallowed import from: {node.module}. "
+                    f"Allowed: {', '.join(sorted(ALLOWED_MODULES))}. "
+                    f"Embed data as Python literals instead of fetching it."
+                )
         self.generic_visit(node)
 
 
@@ -82,9 +90,16 @@ def _restricted_import(name, globals=None, locals=None, fromlist=(), level=0):
     """
     root = name.split(".")[0]
     if root in BLOCKED_MODULES:
-        raise ImportError(f"Import of '{name}' is blocked for security")
+        raise ImportError(
+            f"Import of '{name}' is blocked for security. "
+            f"The sandbox has no network access. Embed all data directly in the code as Python literals."
+        )
     if root not in ALLOWED_ROOTS:
-        raise ImportError(f"Import of '{name}' is not allowed")
+        raise ImportError(
+            f"Import of '{name}' is not allowed in the sandbox. "
+            f"Allowed libraries: {', '.join(sorted(ALLOWED_MODULES))}. "
+            f"Embed all data directly in the code as Python literals instead of fetching it."
+        )
     return builtins.__import__(name, globals, locals, fromlist, level)
 
 
