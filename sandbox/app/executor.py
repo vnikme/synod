@@ -10,11 +10,23 @@ import time
 import traceback
 from contextlib import redirect_stdout
 
-# Use "spawn" instead of the default "fork". Uvicorn runs sync endpoints in a
-# thread pool, so forking would copy orphaned lock state (logging, import locks,
-# etc.) into the child process, causing deadlocks that hang until the timeout
-# kills the process — preventing charts from ever being produced.
-_mp_ctx = multiprocessing.get_context("spawn")
+# Use "forkserver" instead of the default "fork" or "spawn".
+#
+# "fork" is unsafe: uvicorn runs sync endpoints in a thread pool, so forking
+# copies orphaned lock state (logging, import locks, etc.) into the child,
+# causing deadlocks.
+#
+# "spawn" is safe but slow: it starts a brand-new Python interpreter per
+# execution. On Cloud Run with 1 vCPU, importing matplotlib + pandas + numpy
+# from scratch takes over 120s, exceeding the sandbox timeout.
+#
+# "forkserver" is both safe and fast: a dedicated server process (no threads)
+# is started once and pre-imports the heavy libraries. Each child is forked
+# from this clean server, inheriting the loaded modules instantly.
+_mp_ctx = multiprocessing.get_context("forkserver")
+_mp_ctx.set_forkserver_preload([
+    "matplotlib", "matplotlib.pyplot", "pandas", "numpy",
+])
 
 ALLOWED_MODULES = frozenset({
     "pandas", "numpy", "matplotlib", "matplotlib.pyplot",
@@ -107,15 +119,20 @@ def _restricted_import(name, globals=None, locals=None, fromlist=(), level=0):
 
 def _run_in_process(code: str, result_queue: multiprocessing.Queue):
     """Execute code in a restricted namespace within a child process."""
+    import sys
     timings: dict[str, float] = {}
 
+    # Write directly to stderr so the parent can see progress even if the
+    # child is killed by the timeout before it puts results on the queue.
     t0 = time.monotonic()
+    print("[sandbox-child] starting imports", file=sys.stderr, flush=True)
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
     import pandas  # noqa: F401
     import numpy  # noqa: F401
     timings["imports_s"] = round(time.monotonic() - t0, 3)
+    print(f"[sandbox-child] imports done in {timings['imports_s']}s", file=sys.stderr, flush=True)
 
     stdout_buf = io.StringIO()
     charts: list[str] = []
@@ -161,7 +178,7 @@ def _run_in_process(code: str, result_queue: multiprocessing.Queue):
     timings["queue_put_s"] = round(time.monotonic() - t3, 3)
 
 
-def execute_code(code: str, timeout: int = 120) -> dict:
+def execute_code(code: str, timeout: int = 60) -> dict:
     """Validate and execute code in a sandboxed subprocess with timeout."""
     logger = logging.getLogger("sandbox.executor")
     timings: dict[str, float] = {}
@@ -198,7 +215,7 @@ def execute_code(code: str, timeout: int = 120) -> dict:
             return {
                 "success": False,
                 "stdout": "",
-                "error": f"Execution timed out after {timeout}s",
+                "error": f"Execution timed out after {timeout}s. Check child stderr for phase (imports vs exec).",
                 "charts": [],
                 "timings": timings,
             }

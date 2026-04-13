@@ -1,5 +1,7 @@
 """Tests for the sandboxed Python code executor."""
 
+import time
+
 from app.executor import execute_code, validate_code
 
 
@@ -245,3 +247,73 @@ plt.bar([1, 2], [3, 4])
         code = "from collections import Counter\nprint(Counter([1,1,2,3]).most_common())"
         result = execute_code(code)
         assert result["success"] is True
+
+
+# --- Forkserver / realistic workload ---
+
+
+class TestForkserverPerformance:
+    """Integration tests verifying forkserver preload keeps imports fast."""
+
+    def test_matplotlib_pandas_chart_completes_quickly(self):
+        """Realistic LLM-generated code similar to the Brent crude oil query.
+
+        With spawn, this would take 60-120s on a cold 1-vCPU Cloud Run
+        instance because matplotlib+pandas+numpy are re-imported from
+        scratch.  With forkserver preload, imports should be sub-second.
+        """
+        code = """
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+from datetime import datetime, timedelta
+
+# Simulated Brent crude oil price data (embedded, no network access)
+dates = pd.date_range(start="2026-02-01", periods=50, freq="B")
+np.random.seed(42)
+prices = 75.0 + np.cumsum(np.random.randn(50) * 0.8)
+
+df = pd.DataFrame({"date": dates, "price": prices})
+
+plt.figure(figsize=(12, 6))
+plt.plot(df["date"], df["price"], linewidth=2, color="#2196F3")
+plt.fill_between(df["date"], df["price"], alpha=0.1, color="#2196F3")
+plt.title("Brent Crude Oil Price (from 1 Feb 2026)", fontsize=14)
+plt.xlabel("Date")
+plt.ylabel("Price (USD/barrel)")
+plt.grid(True, alpha=0.3)
+plt.tight_layout()
+
+print(f"Mean price: ${df['price'].mean():.2f}")
+print(f"Min: ${df['price'].min():.2f}, Max: ${df['price'].max():.2f}")
+"""
+        start = time.monotonic()
+        result = execute_code(code, timeout=30)
+        elapsed = time.monotonic() - start
+
+        assert result["success"] is True, f"execution failed: {result['error']}"
+        assert len(result["charts"]) == 1
+        assert "Mean price" in result["stdout"]
+
+        # With forkserver preload, total wall time should be well under 30s.
+        # On a dev machine it's typically 2-5s.  The 20s ceiling is
+        # deliberately generous to avoid flakiness in CI.
+        assert elapsed < 20, f"took {elapsed:.1f}s — forkserver preload may not be working"
+
+        # Verify timing instrumentation is present and imports are fast
+        timings = result.get("timings", {})
+        assert "child_imports_s" in timings, f"missing child_imports_s in {timings}"
+        assert timings["child_imports_s"] < 10, (
+            f"child imports took {timings['child_imports_s']}s — "
+            f"forkserver preload should make this sub-second"
+        )
+
+    def test_timings_include_all_phases(self):
+        """Verify the timing instrumentation returns all expected phases."""
+        result = execute_code("print('hello')")
+        assert result["success"] is True
+        timings = result.get("timings", {})
+        expected_keys = {"spawn_s", "join_s", "queue_get_s", "total_s",
+                         "child_imports_s", "child_exec_s"}
+        missing = expected_keys - set(timings.keys())
+        assert not missing, f"missing timing keys: {missing} (got: {set(timings.keys())})"
