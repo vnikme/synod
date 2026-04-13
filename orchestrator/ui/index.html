@@ -141,7 +141,7 @@
                     const contentEl = document.getElementById(`content-${messageId}`);
                     const assetsEl = document.getElementById(`assets-${messageId}`);
 
-                    if (!statusEl) { clearInterval(pollInterval); return; }
+                    if (!statusEl) return;
 
                     // Status text
                     const spinnerEl = statusEl.querySelector('svg');
@@ -199,7 +199,6 @@
 
                     // Terminal states
                     if (["COMPLETED", "FAILED", "HITL"].includes(job.status)) {
-                        clearInterval(pollInterval);
                         isPolling = false;
 
                         if (job.status === "HITL") {
@@ -210,20 +209,24 @@
                             input.placeholder = "e.g. Compare Q3 revenue for Apple and Microsoft and draw a chart...";
                         }
                         setInputEnabled(true);
+                    } else {
+                        setTimeout(poll, 2000);
                     }
                 } catch (e) {
                     console.error("Polling error", e);
                     pollErrors++;
                     if (pollErrors >= 5) {
-                        clearInterval(pollInterval);
                         isPolling = false;
                         activeJobId = null;
                         input.placeholder = "e.g. Compare Q3 revenue for Apple and Microsoft and draw a chart...";
                         appendErrorMessage("Lost connection to server. Please try again.");
                         setInputEnabled(true);
+                    } else {
+                        setTimeout(poll, 2000);
                     }
                 }
-            }, 2000);
+            }
+            poll();
         }
 
         // --- Submit handler ---
