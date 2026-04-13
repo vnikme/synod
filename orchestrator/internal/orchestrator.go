@@ -44,12 +44,18 @@ Available agents:
    Put your question in the "instructions" field.
 
 You will receive the full job state as JSON. Examine:
-- prompt: the user's original request
+- prompt: the user's INITIAL request (may be outdated if the user later clarified)
 - collected_facts: structured data gathered so far (empty = no research yet)
 - generated_assets: charts/analysis produced so far (empty = no analysis yet)
 - missing_queries: unfulfilled data requests from previous agent runs
 - final_result: final output text (empty = not done yet)
-- chat_history: prior conversation turns (may contain user clarifications)
+- chat_history: the FULL conversation including user clarifications
+
+CRITICAL: If chat_history contains user replies AFTER an "ask_user" round, those replies
+SUPERSEDE the original prompt. The user's LATEST message is the authoritative intent.
+For example, if prompt says "TSLA IPO" but the user later clarified "I meant OpenAI",
+you MUST act on the clarification, not the original prompt. Re-read the entire
+chat_history to understand the evolved intent before making a routing decision.
 
 Respond with JSON:
 {
@@ -67,7 +73,8 @@ Rules:
 - If the request is ambiguous or you need clarification, route to "ask_user" and put your question in "instructions".
 - "queries" is required when next_agent is "data"; omit otherwise.
 - Be specific in "instructions" — tell the agent exactly what data to find or what to compute.
-- For financial requests, include company names/tickers in queries for SEC EDGAR lookup.`
+- For financial requests, include company names/tickers in queries for SEC EDGAR lookup.
+- When the user has clarified their intent in chat_history, use the clarified intent for queries and instructions.`
 
 type RoutingDecision struct {
 	NextAgent    string   `json:"next_agent"`
