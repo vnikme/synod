@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"time"
 
 	"cloud.google.com/go/firestore"
 )
@@ -25,7 +26,7 @@ func IsPermanentError(err error) bool {
 	return errors.As(err, &pe)
 }
 
-const maxHops = 5
+const maxHops = 15
 
 const orchestratorSystemPrompt = `You are the orchestration agent for a multi-agent business intelligence system.
 Your role is to examine the current state of a task and decide which specialized agent should act next.
@@ -44,12 +45,18 @@ Available agents:
    Put your question in the "instructions" field.
 
 You will receive the full job state as JSON. Examine:
-- prompt: the user's original request
+- prompt: the user's INITIAL request (may be outdated if the user later clarified)
 - collected_facts: structured data gathered so far (empty = no research yet)
-- generated_assets: charts/analysis produced so far (empty = no analysis yet)
+- generated_assets: charts/analysis produced so far (empty = no analysis yet). Each asset has type, name, and for text assets a content_preview showing what was produced.
 - missing_queries: unfulfilled data requests from previous agent runs
 - final_result: final output text (empty = not done yet)
-- chat_history: prior conversation turns (may contain user clarifications)
+- chat_history: the FULL conversation including user clarifications
+
+CRITICAL: If chat_history contains user replies AFTER an "ask_user" round, those replies
+SUPERSEDE the original prompt. The user's LATEST message is the authoritative intent.
+For example, if prompt says "TSLA IPO" but the user later clarified "I meant OpenAI",
+you MUST act on the clarification, not the original prompt. Re-read the entire
+chat_history to understand the evolved intent before making a routing decision.
 
 Respond with JSON:
 {
@@ -60,14 +67,18 @@ Respond with JSON:
 }
 
 Rules:
-- If no facts have been collected yet, route to "data" with specific search queries.
+- If no facts have been collected yet AND no analysis has been produced, route to "data" with specific search queries — UNLESS the task is purely computational (e.g., math, code execution) and needs no external data.
 - If facts exist but no analysis/charts have been produced, route to "analyst".
-- If both facts and analysis artifacts exist, route to "report".
+- If the task needs no external data (pure computation, code execution), route directly to "analyst".
+- If generated_assets is non-empty, the analyst has ALREADY SUCCEEDED. You MUST route to "report" — NEVER back to "analyst". Check the content_preview field to confirm analysis output exists, then proceed to report generation.
 - If final_result is already populated, return "complete".
 - If the request is ambiguous or you need clarification, route to "ask_user" and put your question in "instructions".
 - "queries" is required when next_agent is "data"; omit otherwise.
 - Be specific in "instructions" — tell the agent exactly what data to find or what to compute.
-- For financial requests, include company names/tickers in queries for SEC EDGAR lookup.`
+- For financial requests, include company names/tickers in queries for SEC EDGAR lookup.
+- When the user has clarified their intent in chat_history, use the clarified intent for queries and instructions.
+- If collected_facts contains a "data_unavailable" entry, do NOT route to "data" again for the same topic. Instead, route to "report" to summarize what is known, or "ask_user" to explain the data limitation.
+- Today's date is %s. Use this for any date-related reasoning.`
 
 type RoutingDecision struct {
 	NextAgent    string   `json:"next_agent"`
@@ -216,10 +227,15 @@ func (o *OrchestratorAgent) Execute(ctx context.Context, jobID, sessionID string
 
 	case "ask_user":
 		slog.Info("orchestrator: HITL — asking user for clarification", "job_id", jobID)
+		// Append the agent's question to chat history so the LLM sees the full conversation.
+		if err := o.store.AppendChatHistory(ctx, sessionID, ChatMessage{Role: "assistant", Content: decision.Instructions}); err != nil {
+			slog.Error("orchestrator: failed to append HITL question to chat history", "job_id", jobID, "error", err)
+		}
 		return o.store.UpdateJob(ctx, jobID, sessionID, []firestore.Update{
 			{Path: "status", Value: StatusHITL},
 			{Path: "active_agent", Value: AgentOrchestrator},
-			{Path: "final_result", Value: decision.Instructions},
+			{Path: "agent_instructions", Value: decision.Instructions},
+			{Path: "final_result", Value: ""},
 		})
 
 	case "complete":
@@ -250,7 +266,8 @@ func (o *OrchestratorAgent) decide(ctx context.Context, job *Job, session *Sessi
 	prompt := fmt.Sprintf("Current job state:\n%s\n\nDecide which agent should act next.", string(stateJSON))
 
 	var decision RoutingDecision
-	usage, err := o.gemini.GenerateJSON(ctx, orchestratorSystemPrompt, prompt, &decision)
+	systemPrompt := fmt.Sprintf(orchestratorSystemPrompt, time.Now().Format("2006-01-02"))
+	usage, err := o.gemini.GenerateJSON(ctx, systemPrompt, prompt, &decision)
 	if err != nil {
 		return nil, usage, err
 	}
@@ -282,7 +299,17 @@ func (o *OrchestratorAgent) revertDispatch(ctx context.Context, jobID, sessionID
 func assetSummaries(assets []Asset) []map[string]string {
 	out := make([]map[string]string, len(assets))
 	for i, a := range assets {
-		out[i] = map[string]string{"type": a.Type, "name": a.Name}
+		m := map[string]string{"type": a.Type, "name": a.Name}
+		// Include a content preview for text-based assets so the LLM can see
+		// what was produced. Skip binary content (charts are base64-encoded).
+		if a.Type != "chart" && a.Content != "" {
+			preview := a.Content
+			if len(preview) > 500 {
+				preview = preview[:500] + "…"
+			}
+			m["content_preview"] = preview
+		}
+		out[i] = m
 	}
 	return out
 }

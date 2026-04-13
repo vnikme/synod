@@ -63,15 +63,16 @@ def validate_code(code: str) -> list[str]:
 
 
 def _restricted_import(name, globals=None, locals=None, fromlist=(), level=0):
-    """Import hook enforcing the allowlist at runtime."""
+    """Import hook: block dangerous modules, allow everything else.
+
+    The AST validator already restricts user-level imports to the allowlist.
+    At runtime we only need to block truly dangerous modules because allowed
+    libraries (pandas, numpy, matplotlib) internally import many stdlib
+    modules (time, struct, functools …) that are harmless.
+    """
     root = name.split(".")[0]
     if root in BLOCKED_MODULES:
         raise ImportError(f"Import of '{name}' is blocked for security")
-    if root not in ALLOWED_ROOTS:
-        raise ImportError(
-            f"Import of '{name}' is not allowed. "
-            f"Allowed: {', '.join(sorted(ALLOWED_MODULES))}"
-        )
     return builtins.__import__(name, globals, locals, fromlist, level)
 
 
@@ -80,6 +81,12 @@ def _run_in_process(code: str, result_queue: multiprocessing.Queue):
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
+    # Pre-import heavy allowed libraries before installing the restricted
+    # import hook. This populates sys.modules so subsequent imports by
+    # user code (and internal imports by these libs) hit the cache and
+    # never trigger the restricted hook for os/sys/etc.
+    import pandas  # noqa: F401
+    import numpy  # noqa: F401
 
     stdout_buf = io.StringIO()
     charts: list[str] = []
@@ -117,7 +124,7 @@ def _run_in_process(code: str, result_queue: multiprocessing.Queue):
     })
 
 
-def execute_code(code: str, timeout: int = 30) -> dict:
+def execute_code(code: str, timeout: int = 120) -> dict:
     """Validate and execute code in a sandboxed subprocess with timeout."""
     violations = validate_code(code)
     if violations:

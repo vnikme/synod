@@ -42,6 +42,18 @@ get_service_url() {
         --format='value(status.url)' 2>/dev/null || echo ""
 }
 
+# Retry get_service_url up to N times with a short delay (handles propagation lag).
+wait_for_service_url() {
+    local svc="$1" retries="${2:-5}" url=""
+    for i in $(seq 1 "$retries"); do
+        url=$(get_service_url "$svc")
+        if [ -n "$url" ]; then echo "$url"; return 0; fi
+        echo "  ⏳ Waiting for $svc URL (attempt $i/$retries)..." >&2
+        sleep 3
+    done
+    echo ""
+}
+
 # Use pre-built image if it exists in Artifact Registry, else fall back to --source.
 image_or_source() {
     local svc="$1"
@@ -66,7 +78,7 @@ deploy_sandbox() {
         --no-allow-unauthenticated \
         --memory=1Gi \
         --cpu=1 \
-        --timeout=60 \
+        --timeout=300 \
         --max-instances=5 \
         --set-env-vars="GCP_PROJECT_ID=$PROJECT_ID"
 
@@ -75,11 +87,11 @@ deploy_sandbox() {
 
 # ========== ORCHESTRATOR ==========
 deploy_orchestrator() {
-    # Auto-detect sandbox URL
-    SANDBOX_URL=$(get_service_url sandbox)
+    # Auto-detect sandbox URL (with retry for just-deployed services)
+    SANDBOX_URL=$(wait_for_service_url sandbox)
     if [ -z "$SANDBOX_URL" ]; then
-        echo "❌ Sandbox service not found. Deploy sandbox first."
-        exit 1
+        echo "❌ Sandbox service not found. Deploy sandbox first (or run: $0 all)."
+        return 1
     fi
 
     # Use the Cloud Run service URL for internal callbacks (Cloud Tasks).
@@ -117,8 +129,6 @@ ORCHESTRATOR_BASE_URL=$ORCHESTRATOR_URL,\
 SANDBOX_URL=$SANDBOX_URL,\
 LLM_MODEL=gemini-2.5-flash,\
 GEMINI_API_KEY=$GEMINI_API_KEY,\
-GOOGLE_CSE_API_KEY=${GOOGLE_CSE_API_KEY:-},\
-GOOGLE_CSE_CX=${GOOGLE_CSE_CX:-},\
 SEC_EDGAR_USER_AGENT=${SEC_EDGAR_USER_AGENT:-}"
 
     echo "✅ Orchestrator deployed."

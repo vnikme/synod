@@ -7,7 +7,6 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
-	"net/url"
 	"strings"
 	"sync"
 	"time"
@@ -169,19 +168,15 @@ Limit to the most important 15-20 facts.`
 type DataAgent struct {
 	gemini   *GeminiClient
 	store    *Store
-	cseKey   string
-	cseCX    string
 	edgarUA  string
 	http     *http.Client
 	cikCache *cikCache
 }
 
-func NewDataAgent(gemini *GeminiClient, store *Store, cseKey, cseCX, edgarUA string) *DataAgent {
+func NewDataAgent(gemini *GeminiClient, store *Store, edgarUA string) *DataAgent {
 	return &DataAgent{
 		gemini:   gemini,
 		store:    store,
-		cseKey:   cseKey,
-		cseCX:    cseCX,
 		edgarUA:  edgarUA,
 		http:     &http.Client{Timeout: 30 * time.Second},
 		cikCache: &cikCache{},
@@ -199,8 +194,12 @@ func (a *DataAgent) Execute(ctx context.Context, job *Job, instructions string, 
 	}
 
 	var rawChunks []string
+	var failedQueries []string
+	var totalUsage TokenUsage
 
 	for _, query := range queries {
+		found := false
+
 		// Try SEC EDGAR if the query mentions a known company
 		if cik := a.cikCache.lookup(query); cik != "" {
 			data, err := a.fetchEDGAR(ctx, cik, query)
@@ -208,23 +207,38 @@ func (a *DataAgent) Execute(ctx context.Context, job *Job, instructions string, 
 				slog.Warn("EDGAR fetch failed", "query", query, "error", err)
 			} else {
 				rawChunks = append(rawChunks, fmt.Sprintf("[SEC EDGAR] %s:\n%s", query, data))
+				found = true
 			}
 		}
 
-		// Web search for broader context
-		results, err := a.searchWeb(ctx, query)
+		// Web search for broader context (via Gemini Google Search grounding)
+		results, searchUsage, err := a.searchWeb(ctx, query)
+		totalUsage = totalUsage.Add(searchUsage)
 		if err != nil {
 			slog.Warn("web search failed", "query", query, "error", err)
-			continue
-		}
-		if results != "" {
+		} else if results != "" {
 			rawChunks = append(rawChunks, fmt.Sprintf("[Web Search] '%s':\n%s", query, results))
+			found = true
+		}
+
+		if !found {
+			failedQueries = append(failedQueries, query)
 		}
 	}
 
 	if len(rawChunks) == 0 {
 		slog.Warn("data agent: no data collected", "job_id", job.JobID)
-		return TokenUsage{}, fmt.Errorf("no data collected for queries: %v", queries)
+		// Record that no data was found so the orchestrator doesn't loop.
+		noDataFact := Fact{
+			Key:    "data_unavailable",
+			Value:  fmt.Sprintf("No data could be retrieved for: %s. Web search and SEC EDGAR returned no results.", strings.Join(queries, ", ")),
+			Source: "data_agent",
+		}
+		allFacts := append(job.CollectedFacts, noDataFact)
+		return totalUsage, a.store.UpdateJob(ctx, job.JobID, job.SessionID, []firestore.Update{
+			{Path: "collected_facts", Value: allFacts},
+			{Path: "missing_queries", Value: []string{}},
+		})
 	}
 
 	// LLM-extract structured facts from raw data
@@ -235,60 +249,48 @@ func (a *DataAgent) Execute(ctx context.Context, job *Job, instructions string, 
 	prompt := fmt.Sprintf("Instructions: %s\n\nRaw data:\n%s", instructions, combined)
 
 	var facts []Fact
-	usage, err := a.gemini.GenerateJSON(ctx, factExtractionPrompt, prompt, &facts)
+	extractUsage, err := a.gemini.GenerateJSON(ctx, factExtractionPrompt, prompt, &facts)
+	totalUsage = totalUsage.Add(extractUsage)
 	if err != nil {
-		return usage, fmt.Errorf("fact extraction: %w", err)
+		return totalUsage, fmt.Errorf("fact extraction: %w", err)
+	}
+
+	// If LLM extracted 0 new facts, record that explicitly so the orchestrator
+	// knows data collection yielded nothing and doesn't loop.
+	if len(facts) == 0 && len(failedQueries) > 0 {
+		facts = append(facts, Fact{
+			Key:    "data_unavailable",
+			Value:  fmt.Sprintf("Could not find relevant data for: %s", strings.Join(failedQueries, ", ")),
+			Source: "data_agent",
+		})
 	}
 
 	allFacts := append(job.CollectedFacts, facts...)
 	slog.Info("data agent: done", "job_id", job.JobID, "new_facts", len(facts), "total_facts", len(allFacts))
 
-	return usage, a.store.UpdateJob(ctx, job.JobID, job.SessionID, []firestore.Update{
+	return totalUsage, a.store.UpdateJob(ctx, job.JobID, job.SessionID, []firestore.Update{
 		{Path: "collected_facts", Value: allFacts},
 		{Path: "missing_queries", Value: []string{}},
 	})
 }
 
-// --- Web Search ---
+// --- Web Search (Gemini Google Search grounding) ---
 
-func (a *DataAgent) searchWeb(ctx context.Context, query string) (string, error) {
-	if a.cseKey == "" || a.cseCX == "" {
-		return "", fmt.Errorf("Google CSE not configured")
-	}
-	u := fmt.Sprintf("https://www.googleapis.com/customsearch/v1?key=%s&cx=%s&q=%s&num=5",
-		url.QueryEscape(a.cseKey), url.QueryEscape(a.cseCX), url.QueryEscape(query))
-
-	req, err := http.NewRequestWithContext(ctx, "GET", u, nil)
+func (a *DataAgent) searchWeb(ctx context.Context, query string) (string, TokenUsage, error) {
+	results, summary, usage, err := a.gemini.SearchWeb(ctx, query)
 	if err != nil {
-		return "", err
-	}
-	resp, err := a.http.Do(req)
-	if err != nil {
-		return "", err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		return "", fmt.Errorf("CSE returned %d: %.200s", resp.StatusCode, body)
-	}
-
-	var cseResp struct {
-		Items []struct {
-			Title   string `json:"title"`
-			Snippet string `json:"snippet"`
-			Link    string `json:"link"`
-		} `json:"items"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&cseResp); err != nil {
-		return "", fmt.Errorf("decode CSE response: %w", err)
+		return "", usage, err
 	}
 
 	var sb strings.Builder
-	for i, item := range cseResp.Items {
-		sb.WriteString(fmt.Sprintf("%d. %s\n   %s\n   Source: %s\n\n", i+1, item.Title, item.Snippet, item.Link))
+	if summary != "" {
+		sb.WriteString(summary)
+		sb.WriteString("\n\nSources:\n")
 	}
-	return sb.String(), nil
+	for i, r := range results {
+		sb.WriteString(fmt.Sprintf("%d. %s\n   Source: %s\n", i+1, r.Title, r.URL))
+	}
+	return sb.String(), usage, nil
 }
 
 // --- SEC EDGAR ---

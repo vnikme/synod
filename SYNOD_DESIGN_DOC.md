@@ -99,12 +99,13 @@ The system eschews rigid Directed Acyclic Graphs (DAGs) in favor of a **Pull-Bas
 
 ### 6.2. Sandboxed Code Execution
 *   The `Analyst Agent` generates LLM-produced Python code which is executed in a separate Sandbox service.
-*   **Pre-flight Check:** The Sandbox parses code into an Abstract Syntax Tree (AST). An import allowlist restricts imports to safe modules (pandas, numpy, matplotlib, math, etc.). A custom `__import__` hook enforces this at runtime.
-*   **Execution:** Code runs in a child process with restricted builtins (no exec, eval, compile, open) and a 30-second OS-level timeout. Exceptions are caught and fed back to the LLM for self-debugging.
+*   **Pre-flight Check:** The Sandbox parses code into an Abstract Syntax Tree (AST). An import allowlist restricts direct user imports to safe modules (pandas, numpy, matplotlib, math, etc.). A custom `__import__` hook enforces a runtime blocklist (os, sys, subprocess, etc.), allowing transitive imports from permitted libraries.
+*   **Execution:** Code runs in a child process as a non-root user with restricted builtins (no exec, eval, compile, open) and a 60-second OS-level timeout. Exceptions are caught and fed back to the LLM for self-debugging.
 
 ### 6.3. Infinite Loop Circuit Breaker
-*   To prevent agents from continuously requesting context without resolution, the Go Orchestrator increments a `HopCount` on every state transition.
-*   If `HopCount > 5`, execution is halted. The state transitions to `NEEDS_HUMAN_INPUT` (HITL - Human in the Loop), and the system pauses, awaiting manual user clarification.
+*   To prevent agents from continuously requesting context without resolution, the Go Orchestrator atomically increments a `HopCount` on every state transition.
+*   If `HopCount > 15`, execution is halted. The state transitions to `HITL` (Human in the Loop), and the system pauses, awaiting manual user clarification via the web UI.
+*   `HopCount` is reset to 0 when a user replies and the job resumes.
 
 ### 6.4. Infrastructure Security
 *   Internal endpoints (`/internal/route`) are protected by application-level OIDC middleware that validates the `Authorization: Bearer` token on each request.
@@ -120,4 +121,4 @@ The system eschews rigid Directed Acyclic Graphs (DAGs) in favor of a **Pull-Bas
 
 *   **Audit Trail:** Each agent execution writes an `AuditEntry` to a Firestore subcollection (`jobs/{jobID}/audit`). Entries include timestamp, acting agent, action type, token usage, and optional detail string. The orchestrator emits a "route" entry for each routing decision.
 *   **Cost Tracking:** `TokenUsage` (prompt/completion/total) is returned from every LLM call (`GenerateJSON`, `GenerateText`) and accumulated atomically on the Job document via `AppendAuditLog`. The `token_usage` field on the Job provides a running total for cost monitoring.
-*   **Client UX:** The frontend polls the `Job` document (or connects via Server-Sent Events) to stream the `active_agent`, status, and `token_usage`, providing transparency into the asynchronous execution process.
+*   **Client UX:** The orchestrator embeds a single-page web UI (Tailwind CSS + marked.js + DOMPurify) served at `GET /`. The frontend polls the `Job` document every 2 seconds to display the `active_agent`, status, and `token_usage`, providing transparency into the asynchronous execution process. When the job enters `HITL` status, the UI switches to reply mode, allowing users to provide clarification inline.

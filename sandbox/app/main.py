@@ -1,7 +1,22 @@
+import logging
+
 from fastapi import FastAPI
 from pydantic import BaseModel, Field
 
 from app.executor import execute_code
+
+# Pre-warm matplotlib font cache at startup so child processes don't
+# spend 30s+ building it on first use.
+try:
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    fig, ax = plt.subplots()
+    ax.plot([0, 1], [0, 1])
+    plt.close(fig)
+    logging.info("matplotlib font cache warmed")
+except Exception as e:
+    logging.warning("matplotlib warm-up failed: %s", e)
 
 app = FastAPI(title="Synod Sandbox")
 

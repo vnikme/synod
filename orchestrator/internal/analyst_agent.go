@@ -18,6 +18,7 @@ import (
 const maxCodeRetries = 3
 
 const codeGenSystemPrompt = `You are a Python data analyst. Generate executable Python code for the requested analysis.
+Today's date is %s.
 
 Available libraries: pandas, numpy, matplotlib.pyplot, math, statistics, json, datetime, re.
 You MUST import any library you use (e.g., import pandas as pd).
@@ -46,9 +47,9 @@ func NewAnalystAgent(ctx context.Context, gemini *GeminiClient, store *Store, sa
 	httpClient, err := idtoken.NewClient(ctx, sandboxURL)
 	if err != nil {
 		slog.Warn("idtoken client unavailable, using plain HTTP (sandbox must allow unauthenticated)", "error", err)
-		httpClient = &http.Client{Timeout: 60 * time.Second}
+		httpClient = &http.Client{Timeout: 120 * time.Second}
 	} else {
-		httpClient.Timeout = 60 * time.Second
+		httpClient.Timeout = 120 * time.Second
 	}
 	return &AnalystAgent{
 		gemini:     gemini,
@@ -80,7 +81,7 @@ func (a *AnalystAgent) Execute(ctx context.Context, job *Job, instructions strin
 			p += fmt.Sprintf("\n\nYour previous code failed with error:\n%s\n\nFix the issues and regenerate.", lastError)
 		}
 
-		code, usage, err := a.gemini.GenerateText(ctx, codeGenSystemPrompt, p)
+		code, usage, err := a.gemini.GenerateText(ctx, fmt.Sprintf(codeGenSystemPrompt, time.Now().Format("2006-01-02")), p)
 		if err != nil {
 			return totalUsage, fmt.Errorf("code generation: %w", err)
 		}

@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"synod/orchestrator/internal"
+	"synod/orchestrator/ui"
 )
 
 func main() {
@@ -58,8 +59,6 @@ func main() {
 
 	// Initialize agents
 	dataAgent := internal.NewDataAgent(gemini, store,
-		os.Getenv("GOOGLE_CSE_API_KEY"),
-		os.Getenv("GOOGLE_CSE_CX"),
 		os.Getenv("SEC_EDGAR_USER_AGENT"),
 	)
 	analystAgent, err := internal.NewAnalystAgent(ctx, gemini, store, sandboxURL)
@@ -77,7 +76,7 @@ func main() {
 
 	// HTTP server — receives agent webhook callbacks
 	internalAuth := internal.OIDCAuthMiddleware(selfURL, os.Getenv("SERVICE_ACCOUNT_EMAIL"))
-	server := internal.NewServer(orchestrator, dataAgent, analystAgent, reportAgent, store, dispatcher, selfURL, internalAuth)
+	server := internal.NewServer(orchestrator, dataAgent, analystAgent, reportAgent, store, dispatcher, selfURL, internalAuth, ui.StaticFS)
 
 	port := os.Getenv("PORT")
 	if port == "" {
@@ -87,7 +86,7 @@ func main() {
 		Addr:         ":" + port,
 		Handler:      server,
 		ReadTimeout:  30 * time.Second,
-		WriteTimeout: 120 * time.Second,
+		WriteTimeout: 300 * time.Second,
 		IdleTimeout:  60 * time.Second,
 	}
 

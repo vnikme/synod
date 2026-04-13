@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io/fs"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -26,6 +27,7 @@ type Server struct {
 	selfURL      string
 	internalAuth func(http.Handler) http.Handler
 	mux          *http.ServeMux
+	staticFS     fs.FS
 }
 
 func NewServer(
@@ -33,6 +35,7 @@ func NewServer(
 	data *DataAgent, analyst *AnalystAgent, report *ReportAgent,
 	store *Store, dispatcher *Dispatcher,
 	selfURL string, internalAuth func(http.Handler) http.Handler,
+	staticFS fs.FS,
 ) *Server {
 	if internalAuth == nil {
 		internalAuth = func(next http.Handler) http.Handler { return next }
@@ -47,6 +50,7 @@ func NewServer(
 		selfURL:      selfURL,
 		internalAuth: internalAuth,
 		mux:          http.NewServeMux(),
+		staticFS:     staticFS,
 	}
 	s.registerRoutes()
 	return s
@@ -61,6 +65,31 @@ func (s *Server) registerRoutes() {
 	s.mux.Handle("POST /internal/agent/data", s.internalAuth(http.HandlerFunc(s.handleAgentData)))
 	s.mux.Handle("POST /internal/agent/analyst", s.internalAuth(http.HandlerFunc(s.handleAgentAnalyst)))
 	s.mux.Handle("POST /internal/agent/report", s.internalAuth(http.HandlerFunc(s.handleAgentReport)))
+
+	// Serve embedded UI — SPA fallback: serve index.html for unmatched GET requests.
+	if s.staticFS != nil {
+		s.mux.HandleFunc("GET /", func(w http.ResponseWriter, r *http.Request) {
+			// Try to serve the exact file first; fall back to index.html for SPA routes.
+			if r.URL.Path != "/" {
+				f, err := s.staticFS.Open(strings.TrimPrefix(r.URL.Path, "/"))
+				if err == nil {
+					f.Close()
+					http.FileServerFS(s.staticFS).ServeHTTP(w, r)
+					return
+				}
+			}
+			// Serve index.html for / and any unknown path (SPA catch-all).
+			data, err := fs.ReadFile(s.staticFS, "index.html")
+			if err != nil {
+				http.NotFound(w, r)
+				return
+			}
+			w.Header().Set("Content-Type", "text/html; charset=utf-8")
+			if _, err := w.Write(data); err != nil {
+				slog.Error("failed to write SPA fallback response", "path", r.URL.Path, "error", err)
+			}
+		})
+	}
 }
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -73,6 +102,7 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleIngest(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20) // 1 MB
 
 	var req IngestRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -161,6 +191,7 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleReply(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	jobID := r.PathValue("jobID")
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20) // 1 MB
 
 	var req ReplyRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -172,6 +203,30 @@ func (s *Server) handleReply(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	sessionID := strings.TrimSpace(req.SessionID)
+
+	// Verify job exists and is in HITL state before mutating session.
+	job, err := s.store.GetJob(ctx, jobID, sessionID)
+	if err != nil {
+		slog.Error("reply: get job failed", "error", err)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal error"})
+		return
+	}
+	if job == nil {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "job not found"})
+		return
+	}
+	if job.Status != StatusHITL {
+		writeJSON(w, http.StatusConflict, map[string]string{"error": "job is not awaiting user input"})
+		return
+	}
+
+	// Append user reply to chat history BEFORE resuming the job, so the
+	// orchestrator always sees the clarification when it picks up the task.
+	if err := s.store.AppendChatHistory(ctx, sessionID, ChatMessage{Role: "user", Content: req.Message}); err != nil {
+		slog.Error("reply: append chat history failed", "error", err)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal error"})
+		return
+	}
 
 	// Atomic resume: CAS HITL → QUEUED+orchestrator, reset hop_count, clear final_result.
 	// Only one concurrent reply succeeds; others get the appropriate error.
@@ -190,27 +245,13 @@ func (s *Server) handleReply(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Append user reply to chat history after successful resume — avoids mutating
-	// session state on invalid/non-HITL requests. If this fails, roll back.
-	if err := s.store.AppendChatHistory(ctx, sessionID, ChatMessage{Role: "user", Content: req.Message}); err != nil {
-		slog.Error("reply: append chat history failed", "error", err)
-		if rollbackErr := s.store.UpdateJob(ctx, jobID, sessionID, []firestore.Update{
-			{Path: "status", Value: StatusHITL},
-			{Path: "active_agent", Value: AgentOrchestrator},
-			{Path: "final_result", Value: "Your reply could not be saved. Please retry."},
-		}); rollbackErr != nil {
-			slog.Error("reply: rollback to HITL failed", "error", rollbackErr, "job_id", jobID)
-		}
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal error"})
-		return
-	}
-
 	// Enqueue orchestrator. On failure, roll back to HITL so the client can retry safely.
 	if err := s.dispatcher.Enqueue(ctx, s.selfURL+"/internal/route", jobID, sessionID); err != nil {
 		slog.Error("reply: enqueue route failed", "error", err)
 		if rollbackErr := s.store.UpdateJob(ctx, jobID, sessionID, []firestore.Update{
 			{Path: "status", Value: StatusHITL},
 			{Path: "active_agent", Value: AgentOrchestrator},
+			{Path: "agent_instructions", Value: job.AgentInstructions},
 			{Path: "final_result", Value: "Your reply was received, but resuming the job failed. Please retry."},
 		}); rollbackErr != nil {
 			slog.Error("reply: rollback to HITL failed", "error", rollbackErr, "job_id", jobID)
