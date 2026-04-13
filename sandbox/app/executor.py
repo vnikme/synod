@@ -8,6 +8,12 @@ import multiprocessing
 import traceback
 from contextlib import redirect_stdout
 
+# Use "spawn" instead of the default "fork". Uvicorn runs sync endpoints in a
+# thread pool, so forking would copy orphaned lock state (logging, import locks,
+# etc.) into the child process, causing deadlocks that hang until the timeout
+# kills the process — preventing charts from ever being produced.
+_mp_ctx = multiprocessing.get_context("spawn")
+
 ALLOWED_MODULES = frozenset({
     "pandas", "numpy", "matplotlib", "matplotlib.pyplot",
     "math", "statistics", "collections", "itertools",
@@ -145,8 +151,8 @@ def execute_code(code: str, timeout: int = 120) -> dict:
             "charts": [],
         }
 
-    queue = multiprocessing.Queue()
-    proc = multiprocessing.Process(target=_run_in_process, args=(code, queue))
+    queue = _mp_ctx.Queue()
+    proc = _mp_ctx.Process(target=_run_in_process, args=(code, queue))
     proc.start()
     proc.join(timeout)
 
