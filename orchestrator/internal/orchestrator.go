@@ -25,7 +25,7 @@ func IsPermanentError(err error) bool {
 	return errors.As(err, &pe)
 }
 
-const maxHops = 5
+const maxHops = 15
 
 const orchestratorSystemPrompt = `You are the orchestration agent for a multi-agent business intelligence system.
 Your role is to examine the current state of a task and decide which specialized agent should act next.

@@ -223,6 +223,7 @@ func (s *Store) ResumeHITLJob(ctx context.Context, jobID, sessionID string) (*Jo
 			{Path: "status", Value: StatusQueued},
 			{Path: "active_agent", Value: AgentOrchestrator},
 			{Path: "final_result", Value: ""},
+			{Path: "agent_instructions", Value: ""},
 			{Path: "hop_count", Value: 0},
 			{Path: "updated_at", Value: time.Now()},
 		}); err != nil {
@@ -232,6 +233,7 @@ func (s *Store) ResumeHITLJob(ctx context.Context, jobID, sessionID string) (*Jo
 		job.ActiveAgent = AgentOrchestrator
 		job.HopCount = 0
 		job.FinalResult = ""
+		job.AgentInstructions = ""
 		resumed = &job
 		result = ResumeSucceeded
 		return nil
