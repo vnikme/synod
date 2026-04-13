@@ -38,8 +38,8 @@ Available agents:
    Use when: sufficient facts have been collected and analysis or visualization is needed.
 3. "report" — Synthesizes collected facts and analysis into a structured final report.
    Use when: both data collection and analysis are complete.
-4. "complete" — The task is already finished.
-   Use when: final_result is already set.
+4. "complete" — Finalize the task.
+   Use when: final_result contains a report that adequately addresses the user's request.
 5. "ask_user" — Ask the user a clarifying question.
    Use when: the user's request is ambiguous, lacks specific metrics, or you cannot determine how to proceed.
    Put your question in the "instructions" field.
@@ -49,7 +49,8 @@ You will receive the full job state as JSON. Examine:
 - collected_facts: structured data gathered so far (empty = no research yet)
 - generated_assets: charts/analysis produced so far (empty = no analysis yet). Each asset has type, name, and for text assets a content_preview showing what was produced.
 - missing_queries: unfulfilled data requests from previous agent runs
-- final_result: final output text (empty = not done yet)
+- final_result: the synthesized report text (empty = no report yet)
+- last_agent_summary: feedback from the LAST agent that ran — what it did, what succeeded, what failed. Use this to decide the next step.
 - chat_history: the FULL conversation including user clarifications
 
 CRITICAL: If chat_history contains user replies AFTER an "ask_user" round, those replies
@@ -67,11 +68,12 @@ Respond with JSON:
 }
 
 Rules:
+- Read last_agent_summary first to understand what just happened, then decide the next step.
 - If no facts have been collected yet AND no analysis has been produced, route to "data" with specific search queries — UNLESS the task is purely computational (e.g., math, code execution) and needs no external data.
 - If facts exist but no analysis/charts have been produced, route to "analyst".
 - If the task needs no external data (pure computation, code execution), route directly to "analyst".
 - If generated_assets is non-empty, the analyst has ALREADY SUCCEEDED. You MUST route to "report" — NEVER back to "analyst". Check the content_preview field to confirm analysis output exists, then proceed to report generation.
-- If final_result is already populated, return "complete".
+- If final_result is non-empty, the report has been written. Evaluate whether it adequately addresses the user's request. If yes, route to "complete". If the report is missing key information or is clearly inadequate, you may route to "data" or "analyst" for additional work — but only with specific instructions for what is missing.
 - If the request is ambiguous or you need clarification, route to "ask_user" and put your question in "instructions".
 - "queries" is required when next_agent is "data"; omit otherwise.
 - Be specific in "instructions" — tell the agent exactly what data to find or what to compute.
@@ -141,7 +143,8 @@ func (o *OrchestratorAgent) Execute(ctx context.Context, jobID, sessionID string
 		return o.store.UpdateJob(ctx, jobID, sessionID, []firestore.Update{
 			{Path: "status", Value: StatusHITL},
 			{Path: "active_agent", Value: AgentOrchestrator},
-			{Path: "final_result", Value: "Maximum processing steps reached. Please refine your request or provide additional context."},
+			{Path: "agent_instructions", Value: "Maximum processing steps reached. Please refine your request or provide additional context."},
+			{Path: "final_result", Value: ""},
 		})
 	}
 
@@ -239,8 +242,11 @@ func (o *OrchestratorAgent) Execute(ctx context.Context, jobID, sessionID string
 		})
 
 	case "complete":
-		slog.Info("orchestrator: task already complete", "job_id", jobID)
-		return nil
+		slog.Info("orchestrator: marking job complete", "job_id", jobID)
+		return o.store.UpdateJob(ctx, jobID, sessionID, []firestore.Update{
+			{Path: "status", Value: StatusCompleted},
+			{Path: "active_agent", Value: AgentOrchestrator},
+		})
 
 	default:
 		return o.failJob(ctx, job, "unknown agent: "+decision.NextAgent)
@@ -249,12 +255,13 @@ func (o *OrchestratorAgent) Execute(ctx context.Context, jobID, sessionID string
 
 func (o *OrchestratorAgent) decide(ctx context.Context, job *Job, session *Session) (*RoutingDecision, TokenUsage, error) {
 	state := map[string]any{
-		"prompt":           job.Prompt,
-		"status":           job.Status,
-		"collected_facts":  job.CollectedFacts,
-		"generated_assets": assetSummaries(job.GeneratedAssets),
-		"missing_queries":  job.MissingQueries,
-		"final_result":     job.FinalResult,
+		"prompt":             job.Prompt,
+		"status":             job.Status,
+		"collected_facts":    job.CollectedFacts,
+		"generated_assets":   assetSummaries(job.GeneratedAssets),
+		"missing_queries":    job.MissingQueries,
+		"final_result":       job.FinalResult,
+		"last_agent_summary": job.LastAgentSummary,
 	}
 	if session != nil && len(session.ChatHistory) > 0 {
 		state["chat_history"] = session.ChatHistory
@@ -303,11 +310,7 @@ func assetSummaries(assets []Asset) []map[string]string {
 		// Include a content preview for text-based assets so the LLM can see
 		// what was produced. Skip binary content (charts are base64-encoded).
 		if a.Type != "chart" && a.Content != "" {
-			preview := a.Content
-			if len(preview) > 500 {
-				preview = preview[:500] + "…"
-			}
-			m["content_preview"] = preview
+			m["content_preview"] = truncateRunes(a.Content, 500)
 		}
 		out[i] = m
 	}

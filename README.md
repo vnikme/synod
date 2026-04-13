@@ -35,6 +35,7 @@ Building with LLMs requires anticipating failure. The system implements:
 *   **Self-Correction Loops:** If a Python worker returns malformed JSON, or if the generated Python script throws a `Traceback`, the worker catches the exception and feeds the error back into the LLM prompt for self-correction (max 3 retries) before failing.
 *   **Infinite Loop Circuit Breaker:** The Go router tracks `hop_count`. If agents bounce context requests back and forth indefinitely (`HopCount > 15`), execution is halted.
 *   **Human-in-the-Loop (HITL):** For ambiguous requests, the Orchestrator transitions to a `HITL` state, pausing the graph and prompting the user for clarification via the web UI before resuming.
+*   **Unit Tested:** Implements a test suite for Go orchestration logic (`make test`) to ensure resilient state transitions and component boundaries.
 *   **Request Body Limits:** Public endpoints enforce 1 MB max body size to prevent memory exhaustion.
 
 ## 4. Web UI
@@ -107,9 +108,11 @@ curl -X POST "https://synod.ai.church/api/v1/tasks/{job_id}/reply" \
 ### Makefile (convenience wrapper)
 ```bash
 make setup              # Run 00_setup.gcp.sh
+make build              # Build docker images to Artifact Registry
 make deploy-all         # Deploy both services
 make deploy-orchestrator
 make deploy-sandbox
+make test               # Run Go unit tests
 ```
 
 ## 7. Trade-offs (24-Hour Constraint)

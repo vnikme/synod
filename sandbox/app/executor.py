@@ -63,16 +63,26 @@ def validate_code(code: str) -> list[str]:
 
 
 def _restricted_import(name, globals=None, locals=None, fromlist=(), level=0):
-    """Import hook: block dangerous modules, allow everything else.
+    """Import hook: enforce the same import allowlist at runtime.
 
-    The AST validator already restricts user-level imports to the allowlist.
-    At runtime we only need to block truly dangerous modules because allowed
-    libraries (pandas, numpy, matplotlib) internally import many stdlib
-    modules (time, struct, functools …) that are harmless.
+    User code can call ``__import__`` directly, which bypasses AST checks for
+    ``import`` statements. To prevent sandbox escapes, runtime imports must be
+    restricted to the same allowlist enforced by ``CodeValidator``.
+
+    Allowed third-party libraries are pre-imported before this hook is exposed
+    to user code, so subsequent imports of allowed modules can resolve from
+    ``sys.modules`` cache. Cached modules must still satisfy the same blocked
+    and allowed-root checks as uncached imports.
     """
+    import sys as _sys
     root = name.split(".")[0]
     if root in BLOCKED_MODULES:
         raise ImportError(f"Import of '{name}' is blocked for security")
+    if root not in ALLOWED_ROOTS:
+        raise ImportError(f"Import of '{name}' is not allowed")
+    # Return cached modules when their root is explicitly allowed.
+    if name in _sys.modules:
+        return _sys.modules[name]
     return builtins.__import__(name, globals, locals, fromlist, level)
 
 
