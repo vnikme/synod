@@ -86,8 +86,10 @@ deploy_orchestrator() {
     # The custom domain is for external clients only and may not be active yet.
     ORCHESTRATOR_URL=$(get_service_url orchestrator)
     if [ -z "$ORCHESTRATOR_URL" ]; then
-        # First deploy — will update after service is created.
-        ORCHESTRATOR_URL="https://$DOMAIN"
+        # First deploy — deploy once to get a URL, then update env vars.
+        echo "ℹ️  First orchestrator deploy: will re-deploy to set ORCHESTRATOR_BASE_URL."
+        FIRST_DEPLOY=true
+        ORCHESTRATOR_URL="https://placeholder.run.app"
     fi
 
     local SRC
@@ -113,19 +115,30 @@ CLOUD_TASKS_QUEUE=$QUEUE_NAME,\
 SERVICE_ACCOUNT_EMAIL=$SA_EMAIL,\
 ORCHESTRATOR_BASE_URL=$ORCHESTRATOR_URL,\
 SANDBOX_URL=$SANDBOX_URL,\
-LLM_MODEL=gemini-2.0-flash,\
+LLM_MODEL=gemini-2.5-flash,\
 GEMINI_API_KEY=$GEMINI_API_KEY,\
 GOOGLE_CSE_API_KEY=${GOOGLE_CSE_API_KEY:-},\
 GOOGLE_CSE_CX=${GOOGLE_CSE_CX:-},\
 SEC_EDGAR_USER_AGENT=${SEC_EDGAR_USER_AGENT:-}"
 
     echo "✅ Orchestrator deployed."
+
+    # On first deploy, re-read the actual URL and update the env var.
+    if [ "${FIRST_DEPLOY:-}" = true ]; then
+        ORCHESTRATOR_URL=$(get_service_url orchestrator)
+        echo "=== Updating ORCHESTRATOR_BASE_URL to $ORCHESTRATOR_URL ==="
+        gcloud run services update orchestrator \
+            --region="$REGION" \
+            --project="$PROJECT_ID" \
+            --update-env-vars="ORCHESTRATOR_BASE_URL=$ORCHESTRATOR_URL"
+        echo "✅ Orchestrator BASE_URL updated."
+    fi
 }
 
 # ========== DOMAIN MAPPING ==========
 setup_domain() {
     echo "=== Mapping custom domain: $DOMAIN ==="
-    gcloud run domain-mappings create \
+    gcloud beta run domain-mappings create \
         --service=orchestrator \
         --domain="$DOMAIN" \
         --region="$REGION" \
@@ -134,12 +147,15 @@ setup_domain() {
     echo ""
     echo "=== DNS Configuration Required ==="
     echo "Add the following DNS records for $DOMAIN:"
-    gcloud run domain-mappings describe \
+    gcloud beta run domain-mappings describe \
         --domain="$DOMAIN" \
         --region="$REGION" \
         --project="$PROJECT_ID" \
         --format='table(resourceRecords.type, resourceRecords.name, resourceRecords.rrdata)' 2>/dev/null || \
         echo "  (Run this script again after deployment to see DNS records)"
+    echo ""
+    echo "NOTE: You must first verify domain ownership:"
+    echo "  gcloud domains verify $DOMAIN"
     echo ""
 }
 

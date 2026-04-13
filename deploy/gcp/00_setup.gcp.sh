@@ -24,6 +24,7 @@ gcloud services enable \
     secretmanager.googleapis.com \
     artifactregistry.googleapis.com \
     cloudbuild.googleapis.com \
+    customsearch.googleapis.com \
     --project=$PROJECT_ID
 
 echo "=== 3. Initializing Firestore Database (Native Mode) ==="
@@ -63,5 +64,11 @@ gcloud projects add-iam-policy-binding $PROJECT_ID \
 gcloud projects add-iam-policy-binding $PROJECT_ID \
     --member="serviceAccount:${SA_EMAIL}" \
     --role="roles/run.invoker"
+
+# Role 4: Service Account User (Cloud Tasks needs actAs to mint OIDC tokens)
+gcloud iam service-accounts add-iam-policy-binding "${SA_EMAIL}" \
+    --member="serviceAccount:${SA_EMAIL}" \
+    --role="roles/iam.serviceAccountUser" \
+    --project=$PROJECT_ID
 
 echo "✅ GCP Initialization Complete for ${PROJECT_ID}!"
