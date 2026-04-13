@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io/fs"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -26,6 +27,7 @@ type Server struct {
 	selfURL      string
 	internalAuth func(http.Handler) http.Handler
 	mux          *http.ServeMux
+	staticFS     fs.FS
 }
 
 func NewServer(
@@ -33,6 +35,7 @@ func NewServer(
 	data *DataAgent, analyst *AnalystAgent, report *ReportAgent,
 	store *Store, dispatcher *Dispatcher,
 	selfURL string, internalAuth func(http.Handler) http.Handler,
+	staticFS fs.FS,
 ) *Server {
 	if internalAuth == nil {
 		internalAuth = func(next http.Handler) http.Handler { return next }
@@ -47,6 +50,7 @@ func NewServer(
 		selfURL:      selfURL,
 		internalAuth: internalAuth,
 		mux:          http.NewServeMux(),
+		staticFS:     staticFS,
 	}
 	s.registerRoutes()
 	return s
@@ -61,6 +65,11 @@ func (s *Server) registerRoutes() {
 	s.mux.Handle("POST /internal/agent/data", s.internalAuth(http.HandlerFunc(s.handleAgentData)))
 	s.mux.Handle("POST /internal/agent/analyst", s.internalAuth(http.HandlerFunc(s.handleAgentAnalyst)))
 	s.mux.Handle("POST /internal/agent/report", s.internalAuth(http.HandlerFunc(s.handleAgentReport)))
+
+	// Serve embedded UI — catch-all for unmatched GET requests.
+	if s.staticFS != nil {
+		s.mux.Handle("GET /", http.FileServerFS(s.staticFS))
+	}
 }
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {

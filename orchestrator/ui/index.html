@@ -1,0 +1,284 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Synod.ai | Multi-Agent Solver</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+</head>
+<body class="bg-gray-50 h-screen flex flex-col font-sans text-gray-800">
+    <header class="bg-white border-b border-gray-200 px-6 py-4 flex justify-between items-center shadow-sm z-10">
+        <h1 class="text-xl font-bold text-indigo-600 tracking-tight">synod.ai.church</h1>
+        <div class="flex items-center gap-4">
+            <div class="text-sm text-gray-500" id="session-id-display">Session: New</div>
+            <button id="new-chat-btn"
+                class="text-sm bg-gray-100 hover:bg-gray-200 text-gray-700 rounded-lg px-3 py-1.5 transition-colors"
+                title="Start a new conversation">
+                New Chat
+            </button>
+        </div>
+    </header>
+
+    <main class="flex-1 overflow-y-auto p-6 flex flex-col gap-6" id="chat-container">
+        <div class="flex items-start">
+            <div class="bg-white border border-gray-200 rounded-2xl rounded-tl-none px-5 py-4 shadow-sm max-w-3xl">
+                <p>Welcome. I am the Synod Orchestrator. What business intelligence task can I solve for you today?</p>
+            </div>
+        </div>
+    </main>
+
+    <div class="px-6 py-4 bg-white border-t border-gray-200">
+        <form id="chat-form" class="max-w-4xl mx-auto relative">
+            <input type="text" id="prompt-input" autocomplete="off"
+                class="w-full bg-gray-100 border-transparent focus:bg-white focus:border-indigo-500 focus:ring-2 focus:ring-indigo-200 rounded-xl px-5 py-4 pr-16 shadow-sm transition-all outline-none"
+                placeholder="e.g. Compare Q3 revenue for Apple and Microsoft and draw a chart...">
+            <button type="submit" id="submit-btn"
+                class="absolute right-2 top-2 bottom-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg px-4 font-medium transition-colors">
+                Send
+            </button>
+        </form>
+    </div>
+
+    <script>
+        // --- State ---
+        let currentSessionId = localStorage.getItem('synod_session_id') || "";
+        let activeJobId = null;   // non-null while HITL is awaiting reply
+        let isPolling = false;
+
+        if (currentSessionId) {
+            document.getElementById('session-id-display').innerText =
+                `Session: ${currentSessionId.substring(0, 8)}…`;
+        }
+
+        const chatContainer = document.getElementById('chat-container');
+        const form = document.getElementById('chat-form');
+        const input = document.getElementById('prompt-input');
+        const submitBtn = document.getElementById('submit-btn');
+
+        // --- Helpers ---
+        function escapeHtml(str) {
+            const div = document.createElement('div');
+            div.appendChild(document.createTextNode(str));
+            return div.innerHTML;
+        }
+
+        function setInputEnabled(enabled) {
+            input.disabled = !enabled;
+            submitBtn.disabled = !enabled;
+            if (enabled) input.focus();
+        }
+
+        function appendUserMessage(text) {
+            const div = document.createElement('div');
+            div.className = 'flex items-start justify-end';
+            div.innerHTML = `
+                <div class="bg-indigo-600 text-white rounded-2xl rounded-tr-none px-5 py-4 shadow-sm max-w-3xl">
+                    <p>${escapeHtml(text)}</p>
+                </div>`;
+            chatContainer.appendChild(div);
+            chatContainer.scrollTop = chatContainer.scrollHeight;
+        }
+
+        function appendErrorMessage(text) {
+            const div = document.createElement('div');
+            div.className = 'flex items-start';
+            div.innerHTML = `
+                <div class="bg-red-50 border border-red-200 text-red-700 rounded-2xl rounded-tl-none px-5 py-4 shadow-sm max-w-3xl">
+                    <p>${escapeHtml(text)}</p>
+                </div>`;
+            chatContainer.appendChild(div);
+            chatContainer.scrollTop = chatContainer.scrollHeight;
+        }
+
+        function appendAgentMessage(id) {
+            const div = document.createElement('div');
+            div.className = 'flex items-start w-full';
+            div.id = `msg-${id}`;
+            div.innerHTML = `
+                <div class="bg-white border border-gray-200 rounded-2xl rounded-tl-none px-5 py-4 shadow-sm w-full max-w-4xl">
+                    <div class="flex items-center gap-2 mb-2 text-sm font-medium text-gray-500" id="status-${id}">
+                        <svg class="animate-spin h-4 w-4 text-indigo-500" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                            <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+                            <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                        </svg>
+                        <span id="agent-${id}">Orchestrator is planning…</span>
+                    </div>
+                    <div id="content-${id}" class="prose prose-indigo max-w-none text-gray-700"></div>
+                    <div id="assets-${id}" class="mt-4 flex flex-wrap gap-4"></div>
+                </div>`;
+            chatContainer.appendChild(div);
+            chatContainer.scrollTop = chatContainer.scrollHeight;
+        }
+
+        // --- Polling ---
+        async function pollJobStatus(jobId) {
+            setInputEnabled(false);
+            isPolling = true;
+
+            const pollInterval = setInterval(async () => {
+                try {
+                    const res = await fetch(`/api/v1/tasks/${encodeURIComponent(jobId)}?session_id=${encodeURIComponent(currentSessionId)}`);
+                    if (!res.ok) return;
+                    const job = await res.json();
+
+                    const statusEl = document.getElementById(`status-${jobId}`);
+                    const agentEl = document.getElementById(`agent-${jobId}`);
+                    const contentEl = document.getElementById(`content-${jobId}`);
+                    const assetsEl = document.getElementById(`assets-${jobId}`);
+
+                    if (!statusEl) { clearInterval(pollInterval); return; }
+
+                    // Status text
+                    if (job.status === "HITL") {
+                        agentEl.innerText = "Needs your input";
+                        statusEl.querySelector('svg').classList.add('hidden');
+                        statusEl.classList.replace('text-gray-500', 'text-orange-600');
+                    } else if (job.status === "COMPLETED") {
+                        agentEl.innerText = "Completed";
+                        statusEl.querySelector('svg').classList.add('hidden');
+                        statusEl.classList.replace('text-gray-500', 'text-green-600');
+                    } else if (job.status === "FAILED") {
+                        agentEl.innerText = "Failed";
+                        statusEl.querySelector('svg').classList.add('hidden');
+                        statusEl.classList.replace('text-gray-500', 'text-red-600');
+                    } else {
+                        agentEl.innerText = `Active Agent: ${(job.active_agent || '').toUpperCase()} | Status: ${job.status}`;
+                    }
+
+                    // Content
+                    if (job.final_result) {
+                        contentEl.innerHTML = marked.parse(job.final_result);
+                    } else if (job.status === "HITL") {
+                        contentEl.innerHTML =
+                            `<p class="font-medium text-orange-600">I need clarification:</p>` +
+                            `<p>${escapeHtml(job.agent_instructions || "Please clarify your request.")}</p>`;
+                    }
+
+                    // Chart assets
+                    if (job.generated_assets && job.generated_assets.length > 0) {
+                        assetsEl.innerHTML = '';
+                        job.generated_assets.forEach(a => {
+                            if (a.type === "image/png") {
+                                const img = document.createElement('img');
+                                img.src = `data:image/png;base64,${a.content}`;
+                                img.className = 'rounded-lg border shadow-sm max-h-96';
+                                img.alt = a.name || 'chart';
+                                assetsEl.appendChild(img);
+                            }
+                        });
+                    }
+
+                    chatContainer.scrollTop = chatContainer.scrollHeight;
+
+                    // Terminal states
+                    if (["COMPLETED", "FAILED", "HITL"].includes(job.status)) {
+                        clearInterval(pollInterval);
+                        isPolling = false;
+
+                        if (job.status === "HITL") {
+                            activeJobId = jobId;
+                            input.placeholder = "Type your reply…";
+                        } else {
+                            activeJobId = null;
+                            input.placeholder = "e.g. Compare Q3 revenue for Apple and Microsoft and draw a chart...";
+                        }
+                        setInputEnabled(true);
+                    }
+                } catch (e) {
+                    console.error("Polling error", e);
+                }
+            }, 2000);
+        }
+
+        // --- Submit handler ---
+        form.addEventListener('submit', async (e) => {
+            e.preventDefault();
+            const text = input.value.trim();
+            if (!text) return;
+
+            input.value = '';
+            appendUserMessage(text);
+
+            // HITL reply mode
+            if (activeJobId) {
+                const jobId = activeJobId;
+                activeJobId = null;
+                input.placeholder = "e.g. Compare Q3 revenue for Apple and Microsoft and draw a chart...";
+
+                try {
+                    const res = await fetch(`/api/v1/tasks/${encodeURIComponent(jobId)}/reply`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ session_id: currentSessionId, message: text })
+                    });
+                    if (!res.ok) {
+                        const err = await res.json().catch(() => ({}));
+                        appendErrorMessage(err.error || `Reply failed (${res.status})`);
+                        setInputEnabled(true);
+                        return;
+                    }
+
+                    // Resume polling the same job
+                    appendAgentMessage(jobId + '-resume');
+                    pollJobStatus(jobId);
+                } catch (err) {
+                    console.error("Reply error", err);
+                    appendErrorMessage("Network error — could not send reply.");
+                    setInputEnabled(true);
+                }
+                return;
+            }
+
+            // New task
+            const payload = { prompt: text };
+            if (currentSessionId) payload.session_id = currentSessionId;
+
+            try {
+                const res = await fetch('/api/v1/tasks', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload)
+                });
+                if (!res.ok) {
+                    const err = await res.json().catch(() => ({}));
+                    appendErrorMessage(err.error || `Request failed (${res.status})`);
+                    return;
+                }
+                const data = await res.json();
+
+                if (data.session_id) {
+                    currentSessionId = data.session_id;
+                    localStorage.setItem('synod_session_id', currentSessionId);
+                    document.getElementById('session-id-display').innerText =
+                        `Session: ${currentSessionId.substring(0, 8)}…`;
+                }
+
+                if (data.job_id) {
+                    appendAgentMessage(data.job_id);
+                    pollJobStatus(data.job_id);
+                }
+            } catch (err) {
+                console.error("Ingest error", err);
+                appendErrorMessage("Network error — could not submit task.");
+            }
+        });
+
+        // --- New Chat ---
+        document.getElementById('new-chat-btn').addEventListener('click', () => {
+            currentSessionId = "";
+            activeJobId = null;
+            localStorage.removeItem('synod_session_id');
+            document.getElementById('session-id-display').innerText = "Session: New";
+            chatContainer.innerHTML = `
+                <div class="flex items-start">
+                    <div class="bg-white border border-gray-200 rounded-2xl rounded-tl-none px-5 py-4 shadow-sm max-w-3xl">
+                        <p>Welcome. I am the Synod Orchestrator. What business intelligence task can I solve for you today?</p>
+                    </div>
+                </div>`;
+            input.placeholder = "e.g. Compare Q3 revenue for Apple and Microsoft and draw a chart...";
+            setInputEnabled(true);
+        });
+    </script>
+</body>
+</html>
