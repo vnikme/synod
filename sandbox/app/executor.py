@@ -118,7 +118,7 @@ def _run_in_process(code: str, result_queue: multiprocessing.Queue):
     })
 
 
-def execute_code(code: str, timeout: int = 30) -> dict:
+def execute_code(code: str, timeout: int = 60) -> dict:
     """Validate and execute code in a sandboxed subprocess with timeout."""
     violations = validate_code(code)
     if violations:
