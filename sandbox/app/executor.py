@@ -6,6 +6,7 @@ import builtins
 import io
 import logging
 import multiprocessing
+import multiprocessing.queues
 import time
 import traceback
 from contextlib import redirect_stdout
@@ -45,8 +46,9 @@ def _warm_forkserver():
     """Pay one-time forkserver startup/preload cost at import time.
 
     Without this, the first ``proc.start()`` triggers forkserver creation
-    and library preloading, adding unaccounted latency to ``spawn_s`` that
-    is outside the execution timeout.
+    and library preloading, adding one-time startup latency to the first
+    execution before ``join(timeout)`` begins enforcing the execution
+    timeout.
     """
     if _mp_ctx.get_start_method() != "forkserver":
         return
@@ -82,19 +84,23 @@ BLOCKED_MODULES = frozenset({
     "compileall", "py_compile",
 })
 
+# Roots derived from ALLOWED_MODULES — used by the AST validator to check
+# user-written import statements.
+_USER_ALLOWED_ROOTS = frozenset(m.split(".")[0] for m in ALLOWED_MODULES)
+
 # Transitive dependencies of allowed third-party libraries (matplotlib,
 # pandas, numpy).  These are imported internally at runtime — e.g.
 # matplotlib.dates lazily imports dateutil when rendering datetime tick
 # labels — so the runtime import hook must permit them.  They are NOT
-# added to ALLOWED_MODULES because user code should not import them
-# directly (the AST validator enforces that).
+# added to _USER_ALLOWED_ROOTS because user code should not import them
+# directly; only the runtime import hook uses this expanded set.
 _INTERNAL_DEPS = frozenset({
     "dateutil", "six", "pytz", "cycler", "kiwisolver",
     "pyparsing", "packaging", "PIL", "typing_extensions",
     "zoneinfo",
 })
 
-ALLOWED_ROOTS = frozenset(m.split(".")[0] for m in ALLOWED_MODULES) | _INTERNAL_DEPS
+_RUNTIME_ALLOWED_ROOTS = _USER_ALLOWED_ROOTS | _INTERNAL_DEPS
 
 
 class CodeValidator(ast.NodeVisitor):
@@ -108,7 +114,7 @@ class CodeValidator(ast.NodeVisitor):
             root = alias.name.split(".")[0]
             if root in BLOCKED_MODULES:
                 self.violations.append(f"Blocked import: {alias.name} (no network/OS access in sandbox)")
-            elif root not in ALLOWED_ROOTS:
+            elif root not in _USER_ALLOWED_ROOTS:
                 self.violations.append(
                     f"Disallowed import: {alias.name}. "
                     f"Allowed: {', '.join(sorted(ALLOWED_MODULES))}. "
@@ -121,7 +127,7 @@ class CodeValidator(ast.NodeVisitor):
             root = node.module.split(".")[0]
             if root in BLOCKED_MODULES:
                 self.violations.append(f"Blocked import from: {node.module} (no network/OS access in sandbox)")
-            elif root not in ALLOWED_ROOTS:
+            elif root not in _USER_ALLOWED_ROOTS:
                 self.violations.append(
                     f"Disallowed import from: {node.module}. "
                     f"Allowed: {', '.join(sorted(ALLOWED_MODULES))}. "
@@ -159,7 +165,7 @@ def _restricted_import(name, globals=None, locals=None, fromlist=(), level=0):
             f"Import of '{name}' is blocked for security. "
             f"The sandbox has no network access. Embed all data directly in the code as Python literals."
         )
-    if root not in ALLOWED_ROOTS:
+    if root not in _RUNTIME_ALLOWED_ROOTS:
         raise ImportError(
             f"Import of '{name}' is not allowed in the sandbox. "
             f"Allowed libraries: {', '.join(sorted(ALLOWED_MODULES))}. "
@@ -170,13 +176,9 @@ def _restricted_import(name, globals=None, locals=None, fromlist=(), level=0):
 
 def _run_in_process(code: str, result_queue: multiprocessing.Queue):
     """Execute code in a restricted namespace within a child process."""
-    import sys as _sys  # always available; not exposed to user code
-
     timings: dict[str, float] = {}
 
     try:
-        # Write directly to stderr so the parent can see progress even if the
-        # child is killed by the timeout before it puts results on the queue.
         t0 = time.monotonic()
         import matplotlib
         matplotlib.use("Agg")
@@ -217,7 +219,8 @@ def _run_in_process(code: str, result_queue: multiprocessing.Queue):
 
         except Exception:
             error = traceback.format_exc()
-            timings["exec_s"] = timings.get("exec_s", round(time.monotonic() - t0 - timings.get("imports_s", 0), 3))
+            if "exec_s" not in timings:
+                timings["exec_s"] = round(max(0, time.monotonic() - t0 - timings.get("imports_s", 0)), 3)
 
         result_queue.put({
             "success": error is None,
@@ -275,26 +278,42 @@ def execute_code(code: str, timeout: int = 60) -> dict:
         # the child can't exit because put() is blocked — classic
         # deadlock.  Reading the queue first drains the pipe so the
         # child's put() can complete and the process can exit.
+        deadline = wall_start + timeout
         result = None
+        queue_error = None
         try:
             t1 = time.monotonic()
-            result = queue.get(timeout=timeout)
+            result = queue.get(timeout=max(0, deadline - t1))
             timings["queue_get_s"] = round(time.monotonic() - t1, 3)
-        except Exception:
-            pass
+        except multiprocessing.queues.Empty:
+            pass  # timed out — child never produced a result
+        except Exception as exc:
+            queue_error = str(exc)
+            logger.warning("queue.get() failed: %s", exc)
 
         t2 = time.monotonic()
-        proc.join(timeout=5)
+        join_budget = max(0, min(5, deadline - t2))
+        proc.join(timeout=join_budget)
         timings["join_s"] = round(time.monotonic() - t2, 3)
 
         if proc.is_alive():
             proc.terminate()
-            proc.join(2)
+            proc.join(max(0, min(2, deadline - time.monotonic())))
             if proc.is_alive():
                 proc.kill()
+                proc.join(1)
 
         if result is None:
             timings["total_s"] = round(time.monotonic() - wall_start, 3)
+            if queue_error is not None:
+                logger.error("queue error", extra={"timings": timings, "queue_error": queue_error})
+                return {
+                    "success": False,
+                    "stdout": "",
+                    "error": f"Subprocess communication error: {queue_error}",
+                    "charts": [],
+                    "timings": timings,
+                }
             if timings.get("queue_get_s") is None:
                 # queue.get() timed out — child never produced a result
                 logger.warning("execution timed out", extra={"timings": timings})

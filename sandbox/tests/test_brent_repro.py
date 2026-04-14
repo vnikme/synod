@@ -5,7 +5,6 @@ succeeds with 3. These tests run with a shorter timeout to fail fast
 locally instead of waiting a full minute.
 """
 
-import pytest
 from app.executor import execute_code
 
 

@@ -260,6 +260,10 @@ class TestForkserverPerformance:
         instance because matplotlib+pandas+numpy are re-imported from
         scratch.  With forkserver preload, imports should be sub-second.
         """
+        from app.executor import _mp_ctx
+        if _mp_ctx.get_start_method() != "forkserver":
+            pytest.skip("forkserver not available; import timing thresholds don't apply")
+
         code = """
 import pandas as pd
 import numpy as np

@@ -464,9 +464,9 @@ func (s *Server) handleAgentExec(w http.ResponseWriter, r *http.Request, agent A
 // These are defense-in-depth against hung HTTP calls or LLM API stalls.
 //
 // Sizing rationale for analyst: up to maxCodeRetries (3) attempts, each
-// consisting of an LLM code-gen call (~30s) plus a sandbox HTTP call (120s
-// client timeout, 60s code execution). Worst case ≈ 3×90s = 4.5min, so
-// 6min provides headroom without being excessive.
+// consisting of an LLM code-gen call (~30s) plus a sandbox execution
+// (60s code timeout, though the HTTP round-trip can be longer on cold
+// starts). Worst case ≈ 3×(30+60)s = 4.5min, so 6min provides headroom.
 func agentExecTimeout(agent AgentType) time.Duration {
 	switch agent {
 	case AgentData:
