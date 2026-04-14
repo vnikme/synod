@@ -52,22 +52,30 @@ def _warm_forkserver():
     """
     if _mp_ctx.get_start_method() != "forkserver":
         return
+    logger = logging.getLogger("sandbox.executor")
     t0 = time.monotonic()
     proc = _mp_ctx.Process(target=_noop_warmup_target)
     try:
         proc.start()
-        proc.join()
-        logging.getLogger("sandbox.executor").info(
-            "forkserver warmed in %.3fs", time.monotonic() - t0)
+        proc.join(timeout=30)
+        if proc.is_alive():
+            logger.warning("forkserver warmup timed out after 30s, killing")
+            proc.terminate()
+            proc.join(5)
+            if proc.is_alive():
+                proc.kill()
+                proc.join(1)
+        else:
+            logger.info("forkserver warmed in %.3fs", time.monotonic() - t0)
     except Exception:
-        logging.getLogger("sandbox.executor").exception(
-            "failed to warm forkserver")
+        logger.exception("failed to warm forkserver")
         if proc.is_alive():
             proc.terminate()
-            proc.join()
+            proc.join(5)
 
 
-_warm_forkserver()
+if multiprocessing.current_process().name == "MainProcess":
+    _warm_forkserver()
 
 ALLOWED_MODULES = frozenset({
     "pandas", "numpy", "matplotlib", "matplotlib.pyplot",
@@ -148,16 +156,17 @@ def validate_code(code: str) -> list[str]:
 
 
 def _restricted_import(name, globals=None, locals=None, fromlist=(), level=0):
-    """Import hook: enforce the same import allowlist at runtime.
+    """Import hook: enforce an import allowlist at runtime.
 
     User code can call ``__import__`` directly, which bypasses AST checks for
-    ``import`` statements. To prevent sandbox escapes, runtime imports must be
-    restricted to the same allowlist enforced by ``CodeValidator``.
+    ``import`` statements. To prevent sandbox escapes, runtime imports are
+    restricted to ``_RUNTIME_ALLOWED_ROOTS``, which includes the user-facing
+    allowlist (``_USER_ALLOWED_ROOTS``) plus internal transitive dependencies
+    (``_INTERNAL_DEPS``) that libraries like matplotlib import lazily.
 
-    Allowed third-party libraries are pre-imported before this hook is exposed
-    to user code, but the actual import result is still delegated to Python's
-    ``__import__`` so standard import semantics are preserved for cached and
-    uncached modules alike.
+    The AST validator (``CodeValidator``) uses a stricter set
+    (``_USER_ALLOWED_ROOTS``) so user code cannot directly import internal
+    deps like dateutil or PIL.
     """
     root = name.split(".")[0]
     if root in BLOCKED_MODULES:

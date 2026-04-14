@@ -1,11 +1,13 @@
-"""Reproduction tests for the Brent crude oil charting timeout.
+"""Regression tests for the Brent crude oil charting bug.
 
-The deployed sandbox times out (60s) when plotting 19 data points but
-succeeds with 3. These tests run with a shorter timeout to fail fast
-locally instead of waiting a full minute.
+Before the fix, the sandbox timed out when rendering date-axis charts
+with tight_layout/labels because the base64 chart payload exceeded the
+OS pipe buffer (64 KB), causing a multiprocessing Queue deadlock.
+These tests verify all chart variants now complete within a short timeout.
 """
 
-from app.executor import execute_code
+import pytest
+from app.executor import execute_code, _mp_ctx
 
 
 # --- Exact code that WORKS on the deployed sandbox (3 points) ---
@@ -22,8 +24,8 @@ plt.title("Test")
 print("done")
 """
 
-# --- Exact code that HANGS on the deployed sandbox (19 points) ---
-HANGING_CODE_19_POINTS = """\
+# --- Code with 19 points (previously hung before the Queue fix) ---
+CODE_19_POINTS = """\
 import pandas as pd
 import matplotlib
 matplotlib.use("Agg")
@@ -162,63 +164,70 @@ plt.grid(True, alpha=0.3)
 print("done")
 """
 
-# Short timeout so we don't wait 60s for a hang.
+# Short timeout — these charts complete in <3s with the fix.
+# Use a longer timeout on spawn (no forkserver preload).
 SHORT_TIMEOUT = 15
+SPAWN_TIMEOUT = 120
+
+
+def _timeout():
+    """Return appropriate timeout based on multiprocessing start method."""
+    return SHORT_TIMEOUT if _mp_ctx.get_start_method() == "forkserver" else SPAWN_TIMEOUT
 
 
 class TestBrentChartReproduction:
-    """Reproduce the sandbox hang with 19-point Brent crude chart."""
+    """Regression tests: date-axis charts must not deadlock."""
 
     def test_3_points_succeeds(self):
         """Baseline: small plot works fine."""
-        result = execute_code(WORKING_CODE_3_POINTS, timeout=SHORT_TIMEOUT)
+        result = execute_code(WORKING_CODE_3_POINTS, timeout=_timeout())
         assert result["success"] is True, f"Expected success, got error: {result['error']}"
         assert "done" in result["stdout"]
         assert len(result["charts"]) == 1
 
     def test_19_points_succeeds(self):
         """19 points with integer x-axis works."""
-        result = execute_code(HANGING_CODE_19_POINTS, timeout=SHORT_TIMEOUT)
+        result = execute_code(CODE_19_POINTS, timeout=_timeout())
         assert result["success"] is True, f"Expected success, got error: {result['error']}"
         assert "done" in result["stdout"]
         assert len(result["charts"]) == 1
 
     def test_dates_no_plot(self):
         """pd.to_datetime + DataFrame without plotting."""
-        result = execute_code(DATES_NO_PLOT, timeout=SHORT_TIMEOUT)
+        result = execute_code(DATES_NO_PLOT, timeout=_timeout())
         assert result["success"] is True, f"Expected success, got error: {result['error']}"
 
     def test_date_axis_plot(self):
         """Plotting with datetime x-axis — baseline."""
-        result = execute_code(DATE_AXIS_PLOT, timeout=SHORT_TIMEOUT)
+        result = execute_code(DATE_AXIS_PLOT, timeout=_timeout())
         assert result["success"] is True, f"Expected success, got error: {result['error']}"
         assert "done" in result["stdout"]
         assert len(result["charts"]) == 1
 
     def test_date_axis_tight_layout(self):
         """Date axis + tight_layout."""
-        result = execute_code(DATE_AXIS_TIGHT, timeout=SHORT_TIMEOUT)
+        result = execute_code(DATE_AXIS_TIGHT, timeout=_timeout())
         assert result["success"] is True, f"Expected success, got error: {result['error']}"
         assert "done" in result["stdout"]
         assert len(result["charts"]) == 1
 
     def test_date_axis_labels(self):
         """Date axis + xlabel/ylabel."""
-        result = execute_code(DATE_AXIS_LABELS, timeout=SHORT_TIMEOUT)
+        result = execute_code(DATE_AXIS_LABELS, timeout=_timeout())
         assert result["success"] is True, f"Expected success, got error: {result['error']}"
         assert "done" in result["stdout"]
         assert len(result["charts"]) == 1
 
     def test_date_axis_grid(self):
         """Date axis + grid."""
-        result = execute_code(DATE_AXIS_GRID, timeout=SHORT_TIMEOUT)
+        result = execute_code(DATE_AXIS_GRID, timeout=_timeout())
         assert result["success"] is True, f"Expected success, got error: {result['error']}"
         assert "done" in result["stdout"]
         assert len(result["charts"]) == 1
 
     def test_full_brent_chart_succeeds(self):
         """Full LLM-generated chart with dates. Should not time out."""
-        result = execute_code(FULL_CHART_CODE, timeout=SHORT_TIMEOUT)
+        result = execute_code(FULL_CHART_CODE, timeout=_timeout())
         assert result["success"] is True, f"Expected success, got error: {result['error']}"
         assert "Chart generated successfully" in result["stdout"]
         assert len(result["charts"]) == 1
