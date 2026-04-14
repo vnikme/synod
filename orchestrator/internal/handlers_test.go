@@ -603,7 +603,7 @@ func TestAgentExecTimeout_Durations(t *testing.T) {
 		wantMax time.Duration
 	}{
 		{AgentData, 2 * time.Minute, 2 * time.Minute},
-		{AgentAnalyst, 10 * time.Minute, 10 * time.Minute},
+		{AgentAnalyst, 6 * time.Minute, 6 * time.Minute},
 		{AgentReport, 90 * time.Second, 90 * time.Second},
 		{AgentOrchestrator, 3 * time.Minute, 3 * time.Minute}, // default
 	}

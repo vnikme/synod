@@ -53,9 +53,9 @@ func NewAnalystAgent(ctx context.Context, gemini LLMClient, store JobStore, sand
 	httpClient, err := idtoken.NewClient(ctx, sandboxURL)
 	if err != nil {
 		slog.Warn("idtoken client unavailable, using plain HTTP (sandbox must allow unauthenticated)", "error", err)
-		httpClient = &http.Client{Timeout: 240 * time.Second}
+		httpClient = &http.Client{Timeout: 120 * time.Second}
 	} else {
-		httpClient.Timeout = 240 * time.Second
+		httpClient.Timeout = 120 * time.Second
 	}
 	return &AnalystAgent{
 		gemini:     gemini,

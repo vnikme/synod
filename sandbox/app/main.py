@@ -4,7 +4,9 @@ import time
 from fastapi import FastAPI
 from pydantic import BaseModel, Field
 
-from app.executor import execute_code
+from app.executor import execute_code, _mp_ctx
+
+logger = logging.getLogger("sandbox")
 
 # Pre-warm matplotlib font cache at startup so child processes don't
 # spend 30s+ building it on first use.
@@ -15,9 +17,11 @@ try:
     fig, ax = plt.subplots()
     ax.plot([0, 1], [0, 1])
     plt.close(fig)
-    logging.info("matplotlib font cache warmed")
+    logger.info("matplotlib font cache warmed")
 except Exception as e:
-    logging.warning("matplotlib warm-up failed: %s", e)
+    logger.warning("matplotlib warm-up failed: %s", e)
+
+logger.info("sandbox ready (mp_context=%s)", _mp_ctx.get_start_method())
 
 app = FastAPI(title="Synod Sandbox")
 
