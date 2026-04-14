@@ -82,7 +82,19 @@ BLOCKED_MODULES = frozenset({
     "compileall", "py_compile",
 })
 
-ALLOWED_ROOTS = frozenset(m.split(".")[0] for m in ALLOWED_MODULES)
+# Transitive dependencies of allowed third-party libraries (matplotlib,
+# pandas, numpy).  These are imported internally at runtime — e.g.
+# matplotlib.dates lazily imports dateutil when rendering datetime tick
+# labels — so the runtime import hook must permit them.  They are NOT
+# added to ALLOWED_MODULES because user code should not import them
+# directly (the AST validator enforces that).
+_INTERNAL_DEPS = frozenset({
+    "dateutil", "six", "pytz", "cycler", "kiwisolver",
+    "pyparsing", "packaging", "PIL", "typing_extensions",
+    "zoneinfo",
+})
+
+ALLOWED_ROOTS = frozenset(m.split(".")[0] for m in ALLOWED_MODULES) | _INTERNAL_DEPS
 
 
 class CodeValidator(ast.NodeVisitor):
@@ -166,14 +178,13 @@ def _run_in_process(code: str, result_queue: multiprocessing.Queue):
         # Write directly to stderr so the parent can see progress even if the
         # child is killed by the timeout before it puts results on the queue.
         t0 = time.monotonic()
-        print("[sandbox-child] starting imports", file=_sys.stderr, flush=True)
         import matplotlib
         matplotlib.use("Agg")
         import matplotlib.pyplot as plt
+        import matplotlib.dates  # noqa: F401 — preload for date-axis rendering
         import pandas  # noqa: F401
         import numpy  # noqa: F401
         timings["imports_s"] = round(time.monotonic() - t0, 3)
-        print(f"[sandbox-child] imports done in {timings['imports_s']}s", file=_sys.stderr, flush=True)
 
         stdout_buf = io.StringIO()
         charts: list[str] = []
@@ -254,42 +265,58 @@ def execute_code(code: str, timeout: int = 60) -> dict:
     timings["spawn_s"] = round(time.monotonic() - t0, 3)
 
     try:
-        t1 = time.monotonic()
-        proc.join(timeout)
-        timings["join_s"] = round(time.monotonic() - t1, 3)
+        # IMPORTANT: Read the queue BEFORE joining the process.
+        #
+        # multiprocessing.Queue writes data through an OS pipe. If the
+        # serialised result (which includes base64 chart PNGs) exceeds
+        # the pipe buffer (64 KB on macOS / Linux), queue.put() in the
+        # child blocks until someone reads from the pipe.  If the parent
+        # calls proc.join() first, it waits for the child to exit — but
+        # the child can't exit because put() is blocked — classic
+        # deadlock.  Reading the queue first drains the pipe so the
+        # child's put() can complete and the process can exit.
+        result = None
+        try:
+            t1 = time.monotonic()
+            result = queue.get(timeout=timeout)
+            timings["queue_get_s"] = round(time.monotonic() - t1, 3)
+        except Exception:
+            pass
+
+        t2 = time.monotonic()
+        proc.join(timeout=5)
+        timings["join_s"] = round(time.monotonic() - t2, 3)
 
         if proc.is_alive():
             proc.terminate()
             proc.join(2)
             if proc.is_alive():
                 proc.kill()
-            timings["total_s"] = round(time.monotonic() - wall_start, 3)
-            logger.warning("execution timed out", extra={"timings": timings})
-            return {
-                "success": False,
-                "stdout": "",
-                "error": (
-                    f"Execution timed out after {timeout}s. "
-                    "See sandbox service logs for phase (imports vs exec)."
-                ),
-                "charts": [],
-                "timings": timings,
-            }
 
-        try:
-            t2 = time.monotonic()
-            result = queue.get(timeout=5)
-            timings["queue_get_s"] = round(time.monotonic() - t2, 3)
-        except Exception:
+        if result is None:
             timings["total_s"] = round(time.monotonic() - wall_start, 3)
-            logger.error("no result from subprocess", extra={"timings": timings})
-            return {
-                "success": False,
-                "stdout": "",
-                "error": "Execution produced no result (process may have crashed)",
-                "charts": [],
-                "timings": timings,
-            }
+            if timings.get("queue_get_s") is None:
+                # queue.get() timed out — child never produced a result
+                logger.warning("execution timed out", extra={"timings": timings})
+                return {
+                    "success": False,
+                    "stdout": "",
+                    "error": (
+                        f"Execution timed out after {timeout}s. "
+                        "See sandbox service logs for phase (imports vs exec)."
+                    ),
+                    "charts": [],
+                    "timings": timings,
+                }
+            else:
+                logger.error("no result from subprocess", extra={"timings": timings})
+                return {
+                    "success": False,
+                    "stdout": "",
+                    "error": "Execution produced no result (process may have crashed)",
+                    "charts": [],
+                    "timings": timings,
+                }
 
         # Merge child-process timings into parent timings
         child_timings = result.pop("timings", {})
